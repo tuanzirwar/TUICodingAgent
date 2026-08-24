@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
+
+import pytest
+
+from tuicodingagent.memory import INDEX_BYTE_LIMIT, MemoryManager, should_update_memory
+from tuicodingagent.models import (
+    ChatMessage,
+    ProviderConfig,
+    ProviderEvent,
+    ProviderEventType,
+    ToolDefinition,
+)
+
+
+class MemoryProvider:
+    config = ProviderConfig("fake", "openai", "model", "secret")
+
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.tools: Sequence[ToolDefinition] | None = None
+
+    async def stream(
+        self,
+        system_prompt: object,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolDefinition] = (),
+    ) -> AsyncIterator[ProviderEvent]:
+        self.tools = tools
+        yield ProviderEvent(ProviderEventType.TEXT_DELTA, text=self.response)
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_memory_create_update_delete_and_no_tools(tmp_path: Path) -> None:
+    workspace = tmp_path / "project"
+    home = tmp_path / "home"
+    manager = MemoryManager(workspace, home)
+    create = MemoryProvider(
+        '[{"action":"create","level":"user","type":"user_preference",'
+        '"title":"简洁回复","slug":"terse_replies","content":"用户偏好简洁回复。"}]'
+    )
+    assert await manager.update(
+        create, (ChatMessage("user", "记住回复简洁"), ChatMessage("assistant", "好的"))
+    )
+    note = home / ".tuicodingagent" / "memory" / "user_preference_terse_replies.md"
+    assert note.is_file() and "created:" in note.read_text(encoding="utf-8")
+    assert "简洁回复" in manager.index_text
+    assert create.tools == ()
+
+    update = MemoryProvider(
+        '[{"action":"update","level":"user",'
+        '"filename":"user_preference_terse_replies.md",'
+        '"title":"非常简洁","content":"用户要求回复非常简洁。"}]'
+    )
+    assert await manager.update(update, (ChatMessage("user", "更简洁"),))
+    assert "非常简洁" in manager.index_text
+
+    delete = MemoryProvider(
+        '[{"action":"delete","level":"user","filename":"user_preference_terse_replies.md"}]'
+    )
+    assert await manager.update(delete, (ChatMessage("user", "忘掉"),))
+    assert not note.exists() and "非常简洁" not in manager.index_text
+
+
+@pytest.mark.asyncio
+async def test_memory_failure_is_isolated(tmp_path: Path) -> None:
+    manager = MemoryManager(tmp_path / "project", tmp_path / "home")
+    assert not await manager.update(MemoryProvider("not-json"), (ChatMessage("user", "x"),))
+
+
+def test_index_injection_limit_and_trigger(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    memory_dir = project / ".tuicodingagent" / "memory"
+    memory_dir.mkdir(parents=True)
+    (memory_dir / "MEMORY.md").write_text("记忆" * 20_000, encoding="utf-8")
+    manager = MemoryManager(project, tmp_path / "home")
+    assert len(manager.index_text.encode("utf-8")) <= INDEX_BYTE_LIMIT
+    assert manager.index_text.endswith("(index truncated)")
+    assert should_update_memory(5, "普通消息")
+    assert should_update_memory(1, "remember this")
+    assert not should_update_memory(1, "普通消息")

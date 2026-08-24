@@ -1,0 +1,29 @@
+providers:
+  - name: OpenAI
+    protocol: openai
+    model: gpt-5-mini
+    base_url: https://api.openai.com/v1/chat/completions
+    api_key: replace-with-your-api-key
+    thinking: false
+    context_window: 128000
+
+  # Responses API 可使用服务根地址，程序会自动补 /v1/responses。
+  - name: OpenAI Responses
+    protocol: openai
+    wire_api: responses
+    model: gpt-5.5
+    base_url: https://api.openai.com
+    api_key: replace-with-your-api-key
+    thinking: true
+    context_window: 1000000
+
+  - name: Anthropic
+    protocol: anthropic
+    model: claude-sonnet-4-5
+    base_url: https://api.anthropic.com/v1/messages
+    api_key: replace-with-your-api-key
+    thinking: true
+    context_window: 200000
+
+# 关闭后定义式 SubAgent 强制前台，Fork 会返回结构化错误。
+enable_subagent_background: true

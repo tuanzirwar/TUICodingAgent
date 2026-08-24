@@ -1,0 +1,8 @@
+data: {"choices":[{"delta":{"reasoning_content":"隐藏思考"}}]}
+
+data: {"choices":[{"delta":{"content":"你"}}]}
+
+data: {"choices":[{"delta":{"content":"好"}}]}
+
+data: [DONE]
+

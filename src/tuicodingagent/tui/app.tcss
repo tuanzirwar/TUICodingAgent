@@ -1,0 +1,236 @@
+Screen {
+    layout: vertical;
+    background: $surface;
+    color: $text;
+}
+
+#banner {
+    height: auto;
+    padding: 1 2;
+    color: $accent;
+    text-style: bold;
+}
+
+#ready-line {
+    height: 1;
+    margin: 0 2;
+    color: $text-muted;
+}
+
+#conversation {
+    height: 1fr;
+    padding: 1 2;
+    scrollbar-gutter: stable;
+}
+
+.chat-entry {
+    height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+}
+
+.user-entry {
+    border-left: thick $primary;
+}
+
+.error-entry {
+    border-left: thick $error;
+    color: $error;
+}
+
+.message-role {
+    height: 1;
+    text-style: bold;
+    color: $accent;
+}
+
+.message-body, .message-markdown {
+    height: auto;
+}
+
+.message-timing {
+    height: 1;
+    color: $text-muted;
+}
+
+.tool-entry {
+    height: auto;
+    margin: 0 1 1 2;
+    padding: 0 1;
+    border-left: thick $warning;
+}
+
+.tool-entry.success {
+    border-left: thick $success;
+}
+
+.tool-entry.failed {
+    border-left: thick $error;
+}
+
+.tool-title {
+    height: 1;
+    text-style: bold;
+}
+
+.tool-summary {
+    height: auto;
+    color: $text-muted;
+}
+
+.tool-entry.failed .tool-summary, .limit-warning {
+    color: $error;
+}
+
+.mode-entry {
+    color: $text-muted;
+    padding: 0 2;
+    margin: 1 0;
+    border-left: tall $accent;
+}
+
+#prompt-box {
+    height: 6;
+    margin: 0 2;
+    border: round $accent;
+    padding: 0 1;
+}
+
+#prompt-row {
+    height: 3;
+}
+
+#prompt-symbol {
+    width: 2;
+    padding-top: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#prompt-input {
+    height: 3;
+    border: none;
+    background: transparent;
+}
+
+#prompt-placeholder {
+    height: 1;
+    color: $text-muted;
+    margin-left: 2;
+}
+
+#command-menu {
+    display: none;
+    height: auto;
+    max-height: 8;
+    margin: 0 2;
+    border: round $accent;
+    background: $surface;
+}
+
+#status-bar {
+    height: 1;
+    padding: 0 2;
+    background: $boost;
+    color: $text-muted;
+    text-align: justify;
+}
+
+ProviderSelectScreen {
+    align: center middle;
+    background: $background 60%;
+}
+
+#provider-dialog {
+    width: 68;
+    max-width: 90%;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    border: round $accent;
+    background: $surface;
+}
+
+#provider-title {
+    height: 1;
+    text-style: bold;
+}
+
+#provider-help {
+    height: 1;
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+#provider-options {
+    height: auto;
+    max-height: 16;
+}
+
+PermissionScreen {
+    align: center middle;
+    background: $background 70%;
+}
+
+ResumeScreen {
+    align: center middle;
+    background: $background 70%;
+}
+
+#resume-dialog {
+    width: 82;
+    max-width: 94%;
+    height: 24;
+    max-height: 88%;
+    padding: 1 2;
+    border: round $accent;
+    background: $surface;
+}
+
+#resume-title {
+    height: 1;
+    text-style: bold;
+}
+
+#resume-help {
+    height: 2;
+    color: $text-muted;
+}
+
+#resume-search {
+    height: 3;
+}
+
+#resume-options {
+    height: 1fr;
+}
+
+#permission-dialog {
+    width: 72;
+    max-width: 92%;
+    height: auto;
+    max-height: 85%;
+    padding: 1 2;
+    border: round $warning;
+    background: $surface;
+}
+
+#permission-title {
+    height: 1;
+    text-style: bold;
+    color: $warning;
+}
+
+#permission-arguments, #permission-reason, #permission-help {
+    height: auto;
+    margin-top: 1;
+}
+
+#permission-reason, #permission-help {
+    color: $text-muted;
+}
+
+#permission-options {
+    height: 5;
+    margin-top: 1;
+}
