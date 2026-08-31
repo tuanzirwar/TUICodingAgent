@@ -4,6 +4,10 @@ TUICodingAgent 是一个使用 Python 编写的终端 AI 编程助手。当前�
 
 系统提示由身份、约束、任务模式、动作、工具、语气和输出七个稳定模块确定性装配。工作目录、平台、日期、Git 状态、版本和模型作为独立动态环境块发送；Anthropic 使用显式缓存断点，OpenAI 保持稳定前缀，并统一统计端点返回的缓存创建/读取 Token。
 
+## 实际使用效果
+
+![TUICodingAgent 实际对话界面](docs/images/tuicodingagent-in-use.png)
+
 ## 安装
 
 需要 Python 3.11 或更高版本：
