@@ -184,7 +184,7 @@ async def test_responses_stream_function_call_replay_and_usage(tmp_path: Path) -
     assert first_body["include"] == ["reasoning.encrypted_content"]
     assert first_body["reasoning"] == {"effort": "high"}
     assert first_body["input"][0] == {"role": "system", "content": "环境"}
-    assert len(first_body["tools"]) == 6
+    assert len(first_body["tools"]) == 8
     assert second_body["input"][1]["type"] == "reasoning"
     assert second_body["input"][2]["type"] == "function_call"
     assert second_body["input"][3]["type"] == "function_call_output"

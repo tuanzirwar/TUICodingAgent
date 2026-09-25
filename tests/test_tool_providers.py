@@ -89,7 +89,7 @@ async def test_openai_assembles_fragmented_parallel_calls_and_serializes_history
         ("call_a", "read_file", {"path": "README.md"}),
         ("call_b", "glob", {"pattern": "*.py"}),
     ]
-    assert len(bodies[0]["tools"]) == 6
+    assert len(bodies[0]["tools"]) == 8
     usage = next(event for event in events if event.type == ProviderEventType.USAGE)
     assert (usage.input_tokens, usage.output_tokens) == (12, 3)
     assert bodies[0]["stream_options"] == {"include_usage": True}
@@ -170,7 +170,7 @@ async def test_anthropic_assembles_tool_use_and_serializes_tool_results(tmp_path
     assert tool_call == ToolCall(
         "tool-a", "read_file", {"path": "README.md"}, '{"path":"README.md"}'
     )
-    assert len(bodies[0]["tools"]) == 6
+    assert len(bodies[0]["tools"]) == 8
     usages = [event for event in events if event.type == ProviderEventType.USAGE]
     assert [(item.input_tokens, item.output_tokens) for item in usages] == [(9, 0), (0, 5)]
 

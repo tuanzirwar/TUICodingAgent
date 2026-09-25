@@ -279,6 +279,40 @@ async def test_mailbox_concurrent_atomic_and_stale_lock(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_sqlite_mailbox_priority_dedup_ack_retry_and_cancel(tmp_path: Path) -> None:
+    mailbox = Mailbox(tmp_path / "mailbox")
+    low = Message("lead", "低优先级", priority=1, dedup_key="same", plan_version=2)
+    duplicate = Message("lead", "不会重复入队", priority=9, dedup_key="same")
+    high = Message("lead", "高优先级", priority=10, max_retry=1)
+    low_id = await mailbox.write("agent-a", low)
+    assert await mailbox.write("agent-a", duplicate) == low_id
+    high_id = await mailbox.write("agent-a", high)
+
+    claimed = await mailbox.claim("agent-a", limit=2, ack_timeout=30)
+    assert [item.text for item in claimed] == ["高优先级", "低优先级"]
+    assert claimed[1].plan_version == 2
+    await mailbox.ack("agent-a", [low_id])
+    assert await mailbox.retry("agent-a", high_id)
+    assert [item.message_id for item in await mailbox.read("agent-a")] == [high_id]
+    assert await mailbox.cancel("agent-a", high_id)
+    assert await mailbox.read("agent-a") == []
+
+
+@pytest.mark.asyncio
+async def test_sqlite_mailbox_recovers_unacked_claim_after_restart(tmp_path: Path) -> None:
+    root = tmp_path / "mailbox"
+    mailbox = Mailbox(root)
+    message_id = await mailbox.write("agent-a", Message("lead", "恢复", max_retry=1))
+    assert await mailbox.claim("agent-a", ack_timeout=0.01)
+    await asyncio.sleep(0.02)
+
+    recovered = Mailbox(root)
+    pending = await recovered.read("agent-a")
+    assert [item.message_id for item in pending] == [message_id]
+    assert pending[0].retry_count == 1
+
+
+@pytest.mark.asyncio
 async def test_manager_polls_and_marks_lead_mail(tmp_path: Path) -> None:
     manager = Manager(tmp_path / "teams")
     team = await manager.create("mail-team")

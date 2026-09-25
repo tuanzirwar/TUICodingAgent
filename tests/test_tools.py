@@ -16,10 +16,19 @@ def call(name: str, **arguments: object) -> ToolCall:
     return ToolCall(f"call-{name}", name, arguments)
 
 
-def test_default_registry_has_six_tools_and_both_protocol_schemas(tmp_path: Path) -> None:
+def test_default_registry_has_tools_and_both_protocol_schemas(tmp_path: Path) -> None:
     registry = create_default_registry(tmp_path)
     names = [item.name for item in registry.definitions()]
-    assert names == ["read_file", "write_file", "edit_file", "bash", "glob", "grep"]
+    assert names == [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "bash",
+        "glob",
+        "grep",
+        "read_artifact",
+        "search_artifact",
+    ]
     assert [item["function"]["name"] for item in registry.api_definitions("openai")] == names
     assert [item["name"] for item in registry.api_definitions("anthropic")] == names
 

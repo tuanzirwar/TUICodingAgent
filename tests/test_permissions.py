@@ -85,6 +85,8 @@ def test_rule_exact_glob_friendly_routes_and_global_priority(tmp_path: Path) -> 
         ("Edit", "edit_file"),
         ("Glob", "glob"),
         ("Grep", "grep"),
+        ("ReadArtifact", "read_artifact"),
+        ("SearchArtifact", "search_artifact"),
     ):
         rule = parse_rule(friendly, PermissionDecision.ALLOW)
         assert decide_rules(

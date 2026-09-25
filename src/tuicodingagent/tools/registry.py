@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Iterable
 from pathlib import Path
 
 from ..models import ProtocolName, ToolCall, ToolDefinition, ToolResult
+from ..trace import TraceEvent, TraceRecorder, token_estimate
+from .artifacts import ReadArtifactTool, SearchArtifactTool
 from .base import Tool, ToolArgumentError, failure
 from .files import EditFileTool, ReadFileTool, WriteFileTool
 from .search import GlobTool, GrepTool
@@ -16,11 +19,25 @@ TOOL_TIMEOUT = 30.0
 
 
 class ToolRegistry:
-    def __init__(self, tools: Iterable[Tool] = (), timeout: float = TOOL_TIMEOUT) -> None:
+    def __init__(
+        self,
+        tools: Iterable[Tool] = (),
+        timeout: float = TOOL_TIMEOUT,
+        trace_recorder: TraceRecorder | None = None,
+    ) -> None:
         self.timeout = timeout
+        self.trace_recorder = trace_recorder
+        self.trace_session_id = ""
+        self.trace_agent_id = ""
+        self.trace_model = ""
         self._tools: dict[str, Tool] = {}
         for tool in tools:
             self.register(tool)
+
+    def set_trace_context(self, session_id: str, agent_id: str, model: str) -> None:
+        self.trace_session_id = session_id
+        self.trace_agent_id = agent_id
+        self.trace_model = model
 
     def register(self, tool: Tool, *, replace: bool = False) -> None:
         name = tool.definition.name
@@ -87,19 +104,41 @@ class ToolRegistry:
         ]
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        if call.parse_error:
-            return failure(call, f"工具参数 JSON 无效：{call.parse_error}")
-        tool = self.get(call.name)
-        if tool is None:
-            return failure(call, f"未知工具：{call.name}")
+        started = time.perf_counter()
+        event = TraceEvent(
+            "tool_call",
+            request_id=call.id,
+            session_id=self.trace_session_id,
+            agent_id=self.trace_agent_id,
+            model=self.trace_model,
+            tool_name=call.name,
+            request_bytes=len(str(call.arguments).encode("utf-8")),
+        )
         try:
-            return await asyncio.wait_for(tool.execute(call), timeout=self.timeout)
-        except TimeoutError:
-            return failure(call, f"工具执行超时（{self.timeout:g} 秒）", timed_out=True)
+            if call.parse_error:
+                result = failure(call, f"工具参数 JSON 无效：{call.parse_error}")
+            elif (tool := self.get(call.name)) is None:
+                result = failure(call, f"未知工具：{call.name}")
+            else:
+                result = await asyncio.wait_for(tool.execute(call), timeout=self.timeout)
+        except TimeoutError as exc:
+            result = failure(call, f"工具执行超时（{self.timeout:g} 秒）", timed_out=True)
+            event.error_type = type(exc).__name__
         except ToolArgumentError as exc:
-            return failure(call, f"工具参数错误：{exc}")
+            result = failure(call, f"工具参数错误：{exc}")
+            event.error_type = type(exc).__name__
         except Exception as exc:  # 工具边界必须把意外异常转成可回灌结果
-            return failure(call, f"工具执行异常：{type(exc).__name__}: {exc}")
+            result = failure(call, f"工具执行异常：{type(exc).__name__}: {exc}")
+            event.error_type = type(exc).__name__
+        output = result.output if result.success else result.error
+        event.tool_latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        event.tool_output_bytes = len(output.encode("utf-8"))
+        event.tool_output_tokens = token_estimate(output)
+        event.response_bytes = event.tool_output_bytes
+        event.finish(success=result.success)
+        if self.trace_recorder is not None:
+            self.trace_recorder.record(event)
+        return result
 
 
 def create_default_registry(workspace: Path) -> ToolRegistry:
@@ -112,5 +151,8 @@ def create_default_registry(workspace: Path) -> ToolRegistry:
             BashTool(root),
             GlobTool(root),
             GrepTool(root),
-        )
+            ReadArtifactTool(root),
+            SearchArtifactTool(root),
+        ),
+        trace_recorder=TraceRecorder.for_workspace(root),
     )

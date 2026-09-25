@@ -1,0 +1,38 @@
+[
+  {
+    "strategy": "raw_truncate",
+    "facts": 240,
+    "fact_recall": 0.095833,
+    "input_tokens": 85265,
+    "output_tokens": 8344,
+    "token_reduction": 0.90214,
+    "compression_cost_tokens": 93609,
+    "latency_ms_p50": 0.00945,
+    "latency_ms_p95": 0.0118,
+    "execution_mode": "local-deterministic"
+  },
+  {
+    "strategy": "old_summary",
+    "facts": 240,
+    "fact_recall": 0.654167,
+    "input_tokens": 85265,
+    "output_tokens": 4643,
+    "token_reduction": 0.945546,
+    "compression_cost_tokens": 89908,
+    "latency_ms_p50": 0.5976,
+    "latency_ms_p95": 0.8864,
+    "execution_mode": "local-deterministic"
+  },
+  {
+    "strategy": "new_structured_summary",
+    "facts": 240,
+    "fact_recall": 1.0,
+    "input_tokens": 85265,
+    "output_tokens": 2836,
+    "token_reduction": 0.966739,
+    "compression_cost_tokens": 88101,
+    "latency_ms_p50": 0.1771,
+    "latency_ms_p95": 0.2861,
+    "execution_mode": "local-deterministic"
+  }
+]

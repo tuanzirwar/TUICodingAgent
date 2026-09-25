@@ -412,7 +412,7 @@ def _preview_body(content: str, original_bytes: int, path: Path) -> str:
         f"[工具结果已落盘，原始字节数：{original_bytes}]\n"
         f"[头部预览]\n{preview}\n"
         f"[完整内容路径] {path}\n"
-        "如需完整内容，请使用文件读取工具读取上述路径。"
+        "如需完整内容，请使用 read_artifact 读取上述路径。"
     )
 
 

@@ -16,6 +16,7 @@ from tuicodingagent.models import (
 )
 from tuicodingagent.runtime import ConversationRuntime
 from tuicodingagent.tools import create_default_registry
+from tuicodingagent.trace import load_events
 
 
 class ScriptedProvider:
@@ -77,7 +78,16 @@ async def test_two_stage_tool_execution_and_feedback_is_protocol_independent(
     assert events[4].tool_result and events[4].tool_result.success
     assert "标题" in events[4].tool_result.output
     assert events[-1].text == "总结完成"
-    assert provider.tool_counts == [6, 6]
+    assert provider.tool_counts == [8, 8]
+    tool_traces = [
+        row
+        for row in load_events(tmp_path / ".tuicodingagent" / "traces" / "events.jsonl")
+        if row["event_type"] == "tool_call"
+    ]
+    assert len(tool_traces) == 1
+    assert tool_traces[0]["session_id"] == runtime.trace_session_id
+    assert tool_traces[0]["agent_id"] == runtime.agent_id
+    assert tool_traces[0]["model"] == "model"
     assert provider.requests[1][-2].tool_calls[0].id == "read-1"
     assert provider.requests[1][-1].tool_results[0].success
     assert len(runtime.history) == 4

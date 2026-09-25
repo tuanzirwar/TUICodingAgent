@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 
@@ -15,7 +17,7 @@ from .context import (
 )
 from .errors import ProviderError
 from .hooks import HookDispatch, HookEngine, HookEvent
-from .memory import MemoryManager, should_update_memory
+from .memory import MemoryManager, explicit_memory_content, should_update_memory
 from .models import (
     AgentMode,
     ChatMessage,
@@ -33,6 +35,8 @@ from .prompts import build_system_prompt, inject_system_reminder, reminder_for
 from .providers.base import ChatProvider
 from .session import RestoredSession, SessionContext, Writer
 from .tools.registry import ToolRegistry
+from .trace import TraceEvent, TraceRecorder, TracingProvider, token_estimate, utc_now
+from .verification import VerificationRunner
 
 MAX_AGENT_ITERATIONS = 12
 MAX_UNKNOWN_TOOL_ROUNDS = 3
@@ -62,8 +66,16 @@ class ConversationRuntime:
         allowed_tools: frozenset[str] | None = None,
         blocked_tool_errors: dict[str, str] | None = None,
         permission_source: str = "",
+        verification_runner: VerificationRunner | None = None,
     ) -> None:
-        self.provider = provider
+        self.trace_recorder = TraceRecorder.for_workspace((workspace or Path.cwd()).resolve())
+        self.trace_session_id = uuid.uuid4().hex
+        self.agent_id = os.getenv("TUICODINGAGENT_AGENT_ID", "lead")
+        self.provider = (
+            provider
+            if isinstance(provider, TracingProvider)
+            else TracingProvider(provider, self.trace_recorder)
+        )
         self.system_prompt_override = system_prompt
         self.tool_registry = tool_registry
         self.workspace = (workspace or Path.cwd()).resolve()
@@ -77,6 +89,9 @@ class ConversationRuntime:
         self.allowed_tools = allowed_tools
         self.blocked_tool_errors = blocked_tool_errors or {}
         self.permission_source = permission_source
+        self.verification_runner = verification_runner
+        if self.verification_runner is None and workspace is not None:
+            self.verification_runner = VerificationRunner(self.workspace)
         self.mode = AgentMode.EXECUTE
         self._history: list[ChatMessage] = []
         self._busy = False
@@ -144,19 +159,36 @@ class ConversationRuntime:
     async def run_to_completion(self, task: str) -> str:
         """非交互跑完整个 ReAct 循环并返回最终文本。"""
 
+        trace = TraceEvent(
+            "agent_task",
+            session_id=self.trace_session_id,
+            agent_id=self.agent_id,
+            model=self.provider.config.model,
+            request_bytes=len(task.encode("utf-8")),
+        )
         chunks: list[str] = []
-        async for event in self.chat(task):
-            if event.type == RuntimeEventType.TEXT_DELTA:
-                chunks.append(event.text)
-            elif event.type == RuntimeEventType.COMPLETED:
-                return event.text or "".join(chunks)
-            elif event.type == RuntimeEventType.FAILED:
-                raise RuntimeError(event.text)
-            elif event.type == RuntimeEventType.CANCELLED:
-                raise asyncio.CancelledError
-            elif event.type == RuntimeEventType.PERMISSION_REQUESTED:
-                raise RuntimeError(f"子 Agent 等待权限审批：{event.text}")
-        return "".join(chunks)
+        try:
+            async for event in self.chat(task):
+                if event.type == RuntimeEventType.TEXT_DELTA:
+                    chunks.append(event.text)
+                elif event.type == RuntimeEventType.COMPLETED:
+                    result = event.text or "".join(chunks)
+                    trace.response_bytes = len(result.encode("utf-8"))
+                    self.trace_recorder.record(trace.finish())
+                    return result
+                elif event.type == RuntimeEventType.FAILED:
+                    raise RuntimeError(event.text)
+                elif event.type == RuntimeEventType.CANCELLED:
+                    raise asyncio.CancelledError
+                elif event.type == RuntimeEventType.PERMISSION_REQUESTED:
+                    raise RuntimeError(f"子 Agent 等待权限审批：{event.text}")
+        except BaseException as exc:
+            self.trace_recorder.record(trace.finish(success=False, error=exc))
+            raise
+        result = "".join(chunks)
+        trace.response_bytes = len(result.encode("utf-8"))
+        self.trace_recorder.record(trace.finish())
+        return result
 
     async def run_hook(self, event: HookEvent, **extra: object) -> HookDispatch:
         if self.hook_engine is None:
@@ -211,12 +243,30 @@ class ConversationRuntime:
         await self._session_lock.acquire()
         self._busy = True
         self._cancel_requested = False
+        if isinstance(self.provider, TracingProvider):
+            session_id = self._session_id() or self.trace_session_id
+            self.trace_session_id = session_id
+            self.provider.set_context(session_id, self.agent_id)
+        if self.tool_registry is not None:
+            self.tool_registry.set_trace_context(
+                self.trace_session_id, self.agent_id, self.provider.config.model
+            )
         started = time.monotonic()
+        turn_trace = TraceEvent(
+            "turn",
+            session_id=self.trace_session_id,
+            agent_id=self.agent_id,
+            model=self.provider.config.model,
+            request_bytes=len(text.encode("utf-8")),
+        )
+        turn_error = ""
         turn_messages = [ChatMessage("user", text)]
         persisted_count = 0
         current_calls: list[ToolCall] = []
         assistant_staged = False
         unknown_rounds = 0
+        modified_paths: set[Path] = set()
+        verification_attempts = 0
         try:
             yield RuntimeEvent(RuntimeEventType.STARTED, elapsed=0.0)
             persisted_count = self._persist_new(turn_messages, persisted_count)
@@ -239,6 +289,18 @@ class ConversationRuntime:
                     self.skill_catalog,
                     self.active_skills,
                 )
+                if self.memory_manager is not None and self.memory_manager.index_text:
+                    memory = self.memory_manager.index_text
+                    self.trace_recorder.record(
+                        TraceEvent(
+                            "retrieval",
+                            session_id=self.trace_session_id,
+                            agent_id=self.agent_id,
+                            response_bytes=len(memory.encode("utf-8")),
+                            output_tokens=token_estimate(memory),
+                            metadata={"source": "long_term_memory_index"},
+                        ).finish()
+                    )
                 if self.system_prompt_override is not None:
                     prompt = type(prompt)(self.system_prompt_override, prompt.environment)
                 definitions = self._definitions()
@@ -386,6 +448,35 @@ class ConversationRuntime:
 
                 complete_text = "".join(round_text)
                 if not current_calls or self.tool_registry is None:
+                    if modified_paths and self.verification_runner is not None:
+                        verification = await self.verification_runner.run(modified_paths)
+                        self.trace_recorder.record(
+                            TraceEvent(
+                                "verification",
+                                session_id=self.trace_session_id,
+                                agent_id=self.agent_id,
+                                model=self.provider.config.model,
+                                response_bytes=len(verification.output.encode("utf-8")),
+                                metadata={"steps": verification.steps},
+                            ).finish(success=verification.success)
+                        )
+                        if not verification.success and verification_attempts < 2:
+                            verification_attempts += 1
+                            turn_messages.append(ChatMessage("assistant", complete_text))
+                            turn_messages.append(
+                                ChatMessage(
+                                    "user",
+                                    "<verification-failed>\n"
+                                    + verification.output
+                                    + "\n请修复后重新验证。",
+                                )
+                            )
+                            persisted_count = self._persist_new(
+                                turn_messages, persisted_count
+                            )
+                            continue
+                        if not verification.success:
+                            complete_text += "\n\n自动验证未通过：\n" + verification.output
                     turn_messages.append(
                         ChatMessage(
                             "assistant",
@@ -395,7 +486,7 @@ class ConversationRuntime:
                     )
                     persisted_count = self._persist_new(turn_messages, persisted_count)
                     self._history.extend(turn_messages)
-                    self._schedule_memory_update(text, tuple(turn_messages))
+                    await self._schedule_memory_update(text, tuple(turn_messages))
                     await self.run_hook(HookEvent.STOP, iter=iteration)
                     yield _completed_event(complete_text, started, iteration)
                     return
@@ -521,6 +612,10 @@ class ConversationRuntime:
                     for call in batch:
                         result = ready_results[call.id]
                         results.append(result)
+                        if result.success and call.name in {"write_file", "edit_file"}:
+                            raw_path = result.metadata.get("path")
+                            if isinstance(raw_path, str):
+                                modified_paths.add(Path(raw_path))
                         await self.run_hook(
                             HookEvent.POST_TOOL_USE,
                             tool_name=call.name,
@@ -561,6 +656,7 @@ class ConversationRuntime:
                     yield _completed_event(warning, started, iteration)
                     return
         except _AgentCancelled:
+            turn_error = "AgentCancelled"
             self._finish_cancelled_history(turn_messages, current_calls, assistant_staged)
             self._persist_new(turn_messages, persisted_count)
             yield RuntimeEvent(
@@ -569,10 +665,12 @@ class ConversationRuntime:
                 elapsed=time.monotonic() - started,
             )
         except asyncio.CancelledError:
+            turn_error = "CancelledError"
             self._finish_cancelled_history(turn_messages, current_calls, assistant_staged)
             self._persist_new(turn_messages, persisted_count)
             raise
         except ProviderError as exc:
+            turn_error = type(exc).__name__
             await self.run_hook(
                 HookEvent.NOTIFICATION,
                 kind="stream_error",
@@ -587,7 +685,15 @@ class ConversationRuntime:
                 text=str(exc),
                 elapsed=time.monotonic() - started,
             )
+        except BaseException as exc:
+            turn_error = type(exc).__name__
+            raise
         finally:
+            turn_trace.tool_latency_ms = round((time.monotonic() - started) * 1000, 3)
+            turn_trace.success = not turn_error
+            turn_trace.error_type = turn_error
+            turn_trace.end_time = utc_now()
+            self.trace_recorder.record(turn_trace)
             self._busy = False
             self._cancel_requested = False
             self._session_lock.release()
@@ -618,6 +724,13 @@ class ConversationRuntime:
                     self.context_controller.context_window,
                     restored.info.context,
                 )
+                # 存档可能保留原始工具输出；恢复时先脱载并重写快照。
+                managed, offloaded = await self.context_controller.offload_and_snip(
+                    self._history
+                )
+                if offloaded:
+                    self._history = list(managed)
+                    writer.replace(managed)
             if old_writer is not None:
                 old_writer.close()
             await self.session_resume()
@@ -671,15 +784,20 @@ class ConversationRuntime:
                 self.session_writer.append(message)
         return len(messages)
 
-    def _schedule_memory_update(
+    async def _schedule_memory_update(
         self, user_text: str, turn_messages: tuple[ChatMessage, ...]
     ) -> None:
         self.turn_count += 1
         if self.memory_manager is None or not should_update_memory(self.turn_count, user_text):
             return
-        task = asyncio.create_task(self.memory_manager.update(self.provider, turn_messages))
+        explicit_text = user_text if explicit_memory_content(user_text) else None
+        task = asyncio.create_task(
+            self.memory_manager.update(self.provider, turn_messages, explicit_text)
+        )
         self._memory_tasks.add(task)
         task.add_done_callback(self._memory_tasks.discard)
+        if explicit_text:
+            await task
 
     def _definitions(self):
         if self.tool_registry is None:
@@ -728,13 +846,42 @@ class ConversationRuntime:
     ) -> CompactResult:
         assert self.context_controller is not None
         await self.run_hook(HookEvent.PRE_COMPACT, trigger=trigger)
-        result = await self.context_controller.compact(
-            self.provider,
-            messages,
-            definitions,
-            trigger,
-            force_offload=force_offload,
+        trace = TraceEvent(
+            "compression",
+            session_id=self.trace_session_id,
+            agent_id=self.agent_id,
+            model=self.provider.config.model,
+            retry_count=int(trigger == "emergency"),
+            metadata={"trigger": trigger},
         )
+        started = time.perf_counter()
+        try:
+            result = await self.context_controller.compact(
+                self.provider,
+                messages,
+                definitions,
+                trigger,
+                force_offload=force_offload,
+            )
+        except BaseException as exc:
+            trace.tool_latency_ms = round((time.perf_counter() - started) * 1000, 3)
+            self.trace_recorder.record(trace.finish(success=False, error=exc))
+            raise
+        trace.input_tokens = result.before_tokens
+        trace.output_tokens = result.after_tokens
+        if result.success and result.messages:
+            summary_content = result.messages[0].content
+            trace.response_bytes = len(summary_content.encode("utf-8"))
+            trace.metadata["summary_tokens"] = token_estimate(summary_content)
+            trace.metadata["summary_bytes"] = trace.response_bytes
+        trace.tool_latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        trace.metadata.update(
+            {
+                "offloaded": result.offloaded,
+                "ratio": result.after_tokens / max(1, result.before_tokens),
+            }
+        )
+        self.trace_recorder.record(trace.finish(success=result.success))
         await self.run_hook(
             HookEvent.POST_COMPACT,
             trigger=trigger,

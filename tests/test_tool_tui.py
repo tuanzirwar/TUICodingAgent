@@ -68,7 +68,11 @@ async def test_tool_line_shows_success_or_failure_and_input_recovers(
         prompt = app.query_one(PromptInput)
         prompt.focus()
         await pilot.press("r", "e", "a", "d", "enter")
-        await pilot.pause(0.3)
+        for _ in range(50):
+            if app.session_state == SessionState.IDLE:
+                break
+            await pilot.pause(0.02)
+        assert app.session_state == SessionState.IDLE
 
         entry = app.query_one(ToolEntry)
         title = str(entry.query_one(".tool-title", Static).render())
@@ -120,6 +124,8 @@ async def test_plan_do_and_usage_status(tmp_path: Path) -> None:
             "read_file",
             "glob",
             "grep",
+            "read_artifact",
+            "search_artifact",
             "load_skill",
             "Agent",
             "TaskList",
@@ -129,7 +135,7 @@ async def test_plan_do_and_usage_status(tmp_path: Path) -> None:
         await pilot.press("/", "d", "o", "enter")
         await pilot.pause(0.2)
         assert provider.requests[1][1].startswith(f"{DO_PROMPT}\n\n<system-reminder>")
-        assert len(provider.requests[1][0]) == 15
+        assert len(provider.requests[1][0]) == 17
         status = str(app.query_one("#status-bar", Static).render())
         assert "default" in status and "↑10" in status and "↓4" in status
 
@@ -161,13 +167,20 @@ async def test_escape_cancels_loop_without_exiting_and_next_turn_works(tmp_path:
         prompt = app.query_one(PromptInput)
         prompt.focus()
         await pilot.press("x", "enter")
-        await pilot.pause(0.1)
+        for _ in range(50):
+            if provider.calls == 1:
+                break
+            await pilot.pause(0.02)
+        assert provider.calls == 1
         assert app.session_state == SessionState.STREAMING
         await pilot.press("escape")
         await pilot.pause(0.2)
         assert app.session_state == SessionState.IDLE and app.is_running
         assert app.runtime and app.runtime.history[-1].role == "assistant"
         await pilot.press("y", "enter")
-        await pilot.pause(0.2)
+        for _ in range(50):
+            if app.session_state == SessionState.IDLE:
+                break
+            await pilot.pause(0.02)
         assert app.session_state == SessionState.IDLE
         assert provider.calls == 2 and len(app.query(Markdown)) >= 1

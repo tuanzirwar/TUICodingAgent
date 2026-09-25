@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from tuicodingagent.memory import INDEX_BYTE_LIMIT, MemoryManager, should_update_memory
+from tuicodingagent.memory import (
+    INDEX_BYTE_LIMIT,
+    MemoryManager,
+    explicit_memory_content,
+    should_update_memory,
+)
 from tuicodingagent.models import (
     ChatMessage,
     ProviderConfig,
@@ -71,6 +76,32 @@ async def test_memory_create_update_delete_and_no_tools(tmp_path: Path) -> None:
 async def test_memory_failure_is_isolated(tmp_path: Path) -> None:
     manager = MemoryManager(tmp_path / "project", tmp_path / "home")
     assert not await manager.update(MemoryProvider("not-json"), (ChatMessage("user", "x"),))
+
+
+@pytest.mark.asyncio
+async def test_explicit_memory_falls_back_when_model_returns_no_operation(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    manager = MemoryManager(tmp_path / "project", home)
+
+    assert await manager.update(
+        MemoryProvider("[]"),
+        (ChatMessage("user", "记住  我喜欢吃辣椒"), ChatMessage("assistant", "好的")),
+        "记住  我喜欢吃辣椒",
+    )
+
+    notes = tuple((home / ".tuicodingagent" / "memory").glob("user_preference_*.md"))
+    assert len(notes) == 1
+    assert "我喜欢吃辣椒" in notes[0].read_text(encoding="utf-8")
+    assert "我喜欢吃辣椒" in manager.index_text
+
+
+def test_explicit_memory_detection_ignores_general_memory_discussion() -> None:
+    assert explicit_memory_content("请记住使用中文回复") == "使用中文回复"
+    assert (
+        explicit_memory_content("remember that I prefer short replies")
+        == "I prefer short replies"
+    )
+    assert explicit_memory_content("人的记忆是如何形成的？") == ""
 
 
 def test_index_injection_limit_and_trigger(tmp_path: Path) -> None:

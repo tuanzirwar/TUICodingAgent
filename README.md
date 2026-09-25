@@ -56,7 +56,7 @@ python -m tuicodingagent
 
 每次对话实时追加到 `.tuicodingagent/sessions/YYYYMMDD-HHMMSS-xxxx/conversation.jsonl`，每行都会 flush 和 fsync。输入 `/resume` 可搜索并选择历史会话；恢复会跳过坏行、截断未完成工具调用，在需要时先压缩，并对暂停超过六小时的会话添加时效提醒。新格式会话超过 30 天会在后台清理，旧格式目录不会被误删。
 
-每五轮或用户明确说“记住”“别忘”“remember”等关键词时，应用会异步调用当前模型更新长期笔记。项目知识存放在 `.tuicodingagent/memory/`，通用用户偏好存放在 `~/.tuicodingagent/memory/`；`MEMORY.md` 索引会在后续请求前自动注入，单次注入最多 25KB。更新请求不携带工具，失败只记录日志，不阻塞或破坏主会话。
+每五轮或用户明确说“记住”“别忘”“remember”等关键词时，应用会调用当前模型更新长期笔记。明确记忆会在本轮完成前落盘，并在模型未返回有效操作时安全兜底保存；每五轮的自动整理仍在后台执行。项目知识存放在 `.tuicodingagent/memory/`，通用用户偏好存放在 `~/.tuicodingagent/memory/`；`MEMORY.md` 索引会在后续请求前自动注入，单次注入最多 25KB。更新请求不携带工具，失败只记录日志，不阻塞或破坏主会话。
 
 按 Shift+Tab 可在 `default`、`acceptEdits`、`plan` 和 `bypassPermissions` 四种权限模式间循环。写文件、编辑和命令等操作会按当前模式弹出审批框；可选择允许本次、始终允许或拒绝本次。危险命令黑名单与项目目录沙箱不可被 bypass 模式绕过。
 
@@ -196,3 +196,9 @@ python -m tuicodingagent
 
 启用后 Lead 仅保留编排、只读检查及 `bash` 收敛工具，状态栏显示
 `[COORDINATOR]`。
+
+## 最新验证结果
+
+工具按需加载在固定资源标识的真实模型任务中完成 10/50/100/200 工具对照：200 工具档的平均模型输入由 9,855 降至 300 tokens，全部 24 次完成样本均选对工具及参数。同一合成会话跨两次进程恢复后累计活跃运行 8 小时、956 轮；该结果验证长任务状态与恢复，不代表真实模型连续编码能力。长会话工具输出以受管工件落盘，避免将完整内容反复注入上下文。
+
+这些结果的样本、环境和解释边界见 [已验证实验摘要](docs/evaluation/verified_summary.md)。

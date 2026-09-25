@@ -25,9 +25,11 @@ ALL_TOOLS = {
     "write_file",
     "edit_file",
     "bash",
-    "glob",
-    "grep",
-    "load_skill",
+            "glob",
+            "grep",
+            "read_artifact",
+            "search_artifact",
+            "load_skill",
     "install_skill",
 }
 
@@ -166,6 +168,8 @@ async def test_load_skill_pins_sop_and_whitelist_applies_each_round(tmp_path: Pa
         "bash",
         "glob",
         "grep",
+        "read_artifact",
+        "search_artifact",
         "load_skill",
     )
 

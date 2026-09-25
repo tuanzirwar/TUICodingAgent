@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tuicodingagent.context import ContextController
 from tuicodingagent.errors import AuthenticationError
 from tuicodingagent.memory import MemoryManager
 from tuicodingagent.models import (
@@ -15,10 +16,17 @@ from tuicodingagent.models import (
     ProviderEvent,
     ProviderEventType,
     RuntimeEventType,
+    ToolCall,
     ToolDefinition,
+    ToolResult,
 )
 from tuicodingagent.runtime import ConversationRuntime
-from tuicodingagent.session import SessionContext, Writer
+from tuicodingagent.session import (
+    SessionContext,
+    Writer,
+    restore_session,
+    scan_sessions,
+)
 
 
 class FakeProvider:
@@ -172,8 +180,7 @@ async def test_runtime_persists_messages_and_runs_explicit_memory_update(
     memory = MemoryManager(tmp_path / "project", tmp_path / "home")
     runtime = ConversationRuntime(provider, session_writer=writer, memory_manager=memory)
 
-    _ = [event async for event in runtime.chat("请记住使用中文回复")]
-    await runtime.close()
+    events = [event async for event in runtime.chat("请记住使用中文回复")]
 
     records = [
         json.loads(line)
@@ -183,4 +190,40 @@ async def test_runtime_persists_messages_and_runs_explicit_memory_update(
     assert records[0]["model"] == "model"
     note = tmp_path / "home" / ".tuicodingagent" / "memory" / "user_preference_chinese_replies.md"
     assert note.is_file()
+    assert events[-1].type == RuntimeEventType.COMPLETED
     assert provider.requests[1][0] and provider.requests[1][1][0].role == "user"
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_restore_offloads_large_persisted_tool_output(tmp_path: Path) -> None:
+    context = SessionContext.create(tmp_path)
+    writer = Writer(context, "model")
+    writer.append(ChatMessage("user", "读取大文件"))
+    writer.append(
+        ChatMessage("assistant", tool_calls=(ToolCall("large-read", "read_file", {}),))
+    )
+    writer.append(
+        ChatMessage(
+            "tool",
+            tool_results=(ToolResult("large-read", "read_file", True, output="x" * 60_000),),
+        )
+    )
+    writer.close()
+
+    restored = restore_session(scan_sessions(tmp_path)[0], now=1)
+    resumed_writer = Writer(context, "model")
+    runtime = ConversationRuntime(
+        FakeProvider([]),
+        workspace=tmp_path,
+        context_controller=ContextController(tmp_path, 80_000, context),
+    )
+    await runtime.restore(restored, resumed_writer)
+
+    result = runtime.history[-1].tool_results[0]
+    assert len(result.output) < 10_000
+    assert (context.spill_dir / "large-read").read_text(encoding="utf-8") == "x" * 60_000
+    resumed_writer.close()
+    reloaded = restore_session(scan_sessions(tmp_path)[0], now=1)
+    assert len(reloaded.messages[-1].tool_results[0].output) < 10_000
+    await runtime.close()

@@ -28,7 +28,7 @@ async def test_single_large_result_offloads_with_stable_preview(tmp_path: Path) 
     assert count == 1 and path.read_text(encoding="utf-8") == content
     assert f"原始字节数：{original_bytes}" in result.output
     assert "[头部预览]" in result.output and "[完整内容路径]" in result.output
-    assert "文件读取工具" in result.output
+    assert "read_artifact" in result.output
     preview = result.output.split("[头部预览]\n", 1)[1].split("\n[完整内容路径]", 1)[0]
     assert len(preview.encode("utf-8")) <= 2_048
     assert len(preview.splitlines()) <= 20

@@ -1,0 +1,92 @@
+"""为 Windows pytest 临时目录设置可写根目录的 validated CLI。"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from dataclasses import asdict
+from pathlib import Path
+
+from .adapters import EXPECTED_MODEL
+from .swebench_system import SystemOptions
+from .swebench_validated import run_validated
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="运行带 setup 和 baseline gate 的 SWE-bench Live 评测"
+    )
+    parser.add_argument("--dataset", required=True)
+    parser.add_argument("--benchmark", default="swebench_live")
+    parser.add_argument("--config", type=Path, default=Path("config.yaml"))
+    parser.add_argument("--provider", default="CloudVisit")
+    parser.add_argument(
+        "--agent", action="append", dest="agents", choices=("tuicodingagent", "codex")
+    )
+    parser.add_argument("--instance-id", action="append", dest="instance_ids")
+    parser.add_argument("--sample", type=int)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--setup-command", default="")
+    parser.add_argument("--max-iterations", type=int, default=6)
+    parser.add_argument("--timeout", type=float, default=600.0)
+    parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    temp_root = args.output_dir.resolve().parent / "pytest-temp-root"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    os.environ["TEMP"] = str(temp_root)
+    os.environ["TMP"] = str(temp_root)
+    agents = tuple(args.agents or ("tuicodingagent", "codex"))
+    options = SystemOptions(
+        config_path=args.config,
+        provider=args.provider,
+        agents=agents,
+        max_iterations=args.max_iterations,
+        timeout_seconds=args.timeout,
+        concurrency=args.concurrency,
+        resume=args.resume,
+        dry_run=args.dry_run,
+    )
+    try:
+        results = run_validated(
+            dataset=args.dataset,
+            output_dir=args.output_dir,
+            options=options,
+            setup_command=args.setup_command,
+            sample=args.sample,
+            instance_ids=set(args.instance_ids or ()),
+            benchmark=args.benchmark,
+        )
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "model": EXPECTED_MODEL,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 2
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "status": "dry_run",
+                    "model": EXPECTED_MODEL,
+                    "agents": list(agents),
+                    "setup_command": args.setup_command,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    print(json.dumps([asdict(result) for result in results], ensure_ascii=False))
+    return 0 if all(result.status in {"completed", "invalid"} for result in results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

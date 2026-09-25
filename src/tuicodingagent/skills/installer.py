@@ -47,7 +47,17 @@ class SkillInstaller:
             if destination.exists():
                 raise ValueError(f"Skill 已存在：{skill.name}")
             payload_root = entry.parent if entry.name == "SKILL.md" else stage
-            os.replace(payload_root, destination)
+            try:
+                os.replace(payload_root, destination)
+            except PermissionError:
+                # Windows 上某些受限目录禁止重命名临时目录，保留复制回退。
+                if destination.exists():
+                    raise
+                try:
+                    shutil.copytree(payload_root, destination)
+                except Exception:
+                    shutil.rmtree(destination, ignore_errors=True)
+                    raise
             return skill.name, destination
         finally:
             shutil.rmtree(stage, ignore_errors=True)

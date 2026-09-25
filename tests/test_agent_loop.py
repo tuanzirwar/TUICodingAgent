@@ -222,7 +222,13 @@ async def test_plan_mode_exposes_only_read_tools_then_execute_restores_all(
     runtime.set_mode(AgentMode.EXECUTE)
     _ = [event async for event in runtime.chat("执行计划")]
 
-    assert provider.requests[0][2] == ("read_file", "glob", "grep")
+    assert provider.requests[0][2] == (
+        "read_file",
+        "glob",
+        "grep",
+        "read_artifact",
+        "search_artifact",
+    )
     assert "当前处于 Plan Mode" in provider.requests[0][1][-1].content
     assert provider.requests[1][2] == (
         "read_file",
@@ -231,6 +237,8 @@ async def test_plan_mode_exposes_only_read_tools_then_execute_restores_all(
         "bash",
         "glob",
         "grep",
+        "read_artifact",
+        "search_artifact",
     )
 
 
@@ -255,7 +263,11 @@ async def test_plan_reminder_repeats_full_on_fixed_cadence_without_polluting_his
     assert all("Plan Mode 仍然生效" in reminders[index] for index in (1, 2, 3))
     assert "等待用户输入 /do" in reminders[4]
     assert "Plan Mode 仍然生效" in reminders[5]
-    assert all(request[2] == ("read_file", "glob", "grep") for request in provider.requests)
+    assert all(
+        request[2]
+        == ("read_file", "glob", "grep", "read_artifact", "search_artifact")
+        for request in provider.requests
+    )
     assert all("system-reminder" not in message.content for message in runtime.history)
     stable_blocks = [request[0].stable for request in provider.requests]
     assert len(set(stable_blocks)) == 1

@@ -21,3 +21,13 @@ __pycache__/
 .ruff_cache/
 tests/ch15_tmux_workspace/
 tests/e2e_workspace/
+
+# 本地测试、评测运行数据与生成文件
+.pytest_tmp_*/
+output/
+tmp/
+.tuicodingagent/traces/
+docs/evaluation/results/**/workspace/
+docs/evaluation/results/**/_repos/
+docs/evaluation/results/**/*.jsonl
+docs/evaluation/results/**/*.log

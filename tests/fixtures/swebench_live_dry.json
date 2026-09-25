@@ -1,0 +1,14 @@
+[
+  {
+    "benchmark": "swebench_live",
+    "version": "local-dry-fixture",
+    "split": "canary",
+    "instance_id": "local__dry-fixture-1",
+    "repo": "C:/mine soft/code/TUI",
+    "base_commit": "2d4edabbd5016c7dfff5c926ecdc056f063c46f5",
+    "problem_statement": "这是仅用于 CLI dry-run 的本地 fixture，不应运行模型。",
+    "FAIL_TO_PASS": [],
+    "PASS_TO_PASS": [],
+    "test_command": ""
+  }
+]
