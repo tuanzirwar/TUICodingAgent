@@ -28,6 +28,7 @@ from ..tools.team import (
 )
 from .context import TeammateContext, with_teammate
 from .core import Manager
+from .delivery import MailboxDelivery
 from .mailbox import Mailbox, Message
 from .service import TeamService
 
@@ -90,28 +91,11 @@ async def run_team_member(args) -> int:
     if args.plan_mode:
         runtime.set_permission_mode(PermissionMode.PLAN)
     mailbox = Mailbox(team.config_dir / "mailbox")
+    runtime.agent_id = member.agent_id
 
-    async def provide_mailbox_messages() -> str:
-        messages = await mailbox.read(member.agent_id)
-        if not messages:
-            return ""
-        await mailbox.mark_read(member.agent_id, list(range(len(messages))))
-        for message in messages:
-            if message.type == "plan_approval_response":
-                runtime.set_permission_mode(
-                    PermissionMode(team.lead_permission_mode)
-                    if message.approve
-                    else PermissionMode.PLAN
-                )
-        rows = [f"收到 {len(messages)} 条新消息:"]
-        rows.extend(
-            f"[{index}] 来自 {message.sender}"
-            f"(type={message.type},ts={message.timestamp}):\n    {message.text}"
-            for index, message in enumerate(messages, 1)
-        )
-        return "<incoming-messages>\n" + "\n".join(rows) + "\n</incoming-messages>"
-
-    runtime.set_reminder_provider(provide_mailbox_messages)
+    MailboxDelivery(
+        runtime, mailbox, member.agent_id, permission_mode=team.lead_permission_mode
+    ).bind()
     wake_event = asyncio.Event()
     reader = asyncio.create_task(_stdin_waker(wake_event))
     try:

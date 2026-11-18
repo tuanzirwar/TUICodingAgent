@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import ProviderEventType
+from .redaction import redact
 
 TRACE_FIELDS = (
     "event_type",
@@ -95,7 +96,9 @@ class TraceRecorder:
     def record(self, event: TraceEvent) -> None:
         if not event.end_time:
             event.end_time = utc_now()
-        line = json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        line = json.dumps(
+            redact(event.to_dict(), personal_data=True), ensure_ascii=False, separators=(",", ":")
+        )
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8", newline="\n") as stream:
@@ -164,7 +167,7 @@ def load_events(path: Path) -> list[dict[str, Any]]:
 
 
 def export_events(events: Iterable[dict[str, Any]], output: Path) -> tuple[Path, Path, Path]:
-    rows = list(events)
+    rows = [redact(event, personal_data=True) for event in events]
     output.mkdir(parents=True, exist_ok=True)
     json_path = output / "benchmark.json"
     csv_path = output / "benchmark.csv"

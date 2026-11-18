@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from pathlib import Path
 
 from ..models import ToolCall, ToolDefinition, ToolResult
@@ -50,7 +51,11 @@ class ReadFileTool:
             call.name,
             True,
             numbered,
-            metadata={"path": str(path), "lines": len(lines)},
+            metadata={
+                "path": str(path),
+                "lines": len(lines),
+                "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            },
             truncated=truncated,
         )
 

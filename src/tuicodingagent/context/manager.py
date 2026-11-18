@@ -253,9 +253,11 @@ class ContextController:
                 recovery,
                 *recent,
             )
+            after = math.ceil(_messages_chars(compacted) / ESTIMATE_CHARS_PER_TOKEN)
+            if after >= self.context_window - MANUAL_SAFETY_MARGIN:
+                raise ProviderError("保留当前请求和近期原文后仍超出上下文预算，请缩小当前输入")
             self.usage_anchor = 0
             self._anchor_chars = 0
-            after = self.estimate_tokens(compacted)
             if reason == "auto":
                 await self._record_auto_success()
             logger.info(
@@ -331,10 +333,23 @@ class ContextController:
         files: list[str] = []
         char_limit = int(FILE_SNAPSHOT_TOKEN_LIMIT * ESTIMATE_CHARS_PER_TOKEN)
         for snapshot in snapshots:
-            content = snapshot.content
+            path = await asyncio.to_thread(Path(snapshot.path).resolve, strict=False)
+            if not path.is_relative_to(self.workspace):
+                files.append("[工作区变化] 文件已越界，请重新读取有效工作区文件。")
+                continue
+            try:
+                content = await asyncio.to_thread(path.read_text, encoding="utf-8")
+            except (OSError, UnicodeError):
+                files.append(f"[工作区变化] {path} 已删除或不可读；旧快照已失效。")
+                continue
+            notice = (
+                "[工作区变化] 内容已更新，以下为当前快照。\n" if content != snapshot.content else ""
+            )
             if len(content) > char_limit:
                 content = f"{content[:char_limit]}\n(content truncated)"
-            files.append(f"文件：{snapshot.path}\n读取时间：{snapshot.read_at}\n{content}")
+            files.append(
+                f"{notice}文件：{snapshot.path}\n原读取时间：{snapshot.read_at}\n{content}"
+            )
         tool_rows = [
             json.dumps(
                 {"name": item.name, "input_schema": item.input_schema},
@@ -400,12 +415,17 @@ def _replace_result_content(result: ToolResult, content: str) -> ToolResult:
 
 
 def _write_once(path: Path, content: bytes) -> None:
+    from ..redaction import redact
+
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        path.write_bytes(content)
+        path.write_text(redact(content.decode("utf-8")), encoding="utf-8")
 
 
 def _preview_body(content: str, original_bytes: int, path: Path) -> str:
+    from ..redaction import redact
+
+    content = redact(content)
     lines = "".join(content.splitlines(keepends=True)[:PREVIEW_LINE_LIMIT])
     preview = lines.encode("utf-8")[:PREVIEW_BYTE_LIMIT].decode("utf-8", errors="ignore")
     return (
@@ -452,6 +472,11 @@ def _recent_messages(messages: tuple[ChatMessage, ...]) -> tuple[ChatMessage, ..
         start -= 1
         tokens += _message_tokens(messages[start])
         count += 1
+    # 多个工具结果可能把最近用户请求挤出最近消息范围，必须一起保留。
+    latest_user = next(
+        (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"), start
+    )
+    start = min(start, latest_user)
     while start > 0 and messages[start].role == "tool":
         start -= 1
     return messages[start:]

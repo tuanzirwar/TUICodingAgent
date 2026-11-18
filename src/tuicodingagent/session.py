@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .models import ChatMessage, ToolCall, ToolResult
+from .redaction import redact
 
 logger = logging.getLogger(__name__)
 SESSION_RE = re.compile(r"^(\d{8}-\d{6})-([0-9a-f]{4})$")
@@ -57,6 +59,7 @@ class Writer:
         self._lock = threading.Lock()
         self._handle = None
         self._first_message = True
+        self.persistence_healthy = False
         try:
             context.session_dir.mkdir(parents=True, exist_ok=True)
             self._first_message = (
@@ -64,6 +67,7 @@ class Writer:
                 or context.conversation_path.stat().st_size == 0
             )
             self._handle = context.conversation_path.open("a", encoding="utf-8", newline="\n")
+            self.persistence_healthy = True
         except OSError as exc:
             logger.warning("无法打开会话存档，继续以内存模式运行：%s", type(exc).__name__)
 
@@ -77,19 +81,37 @@ class Writer:
 
     def replace(self, messages: list[ChatMessage] | tuple[ChatMessage, ...]) -> None:
         with self._lock:
-            if not self._write({"type": "compact", "ts": int(time.time())}):
+            checkpoint_id = secrets.token_hex(8)
+            if not self._write(
+                {
+                    "type": "compact",
+                    "ts": int(time.time()),
+                    "checkpoint_id": checkpoint_id,
+                    "expected_messages": len(messages),
+                }
+            ):
                 return
             for message in messages:
-                self._write(message_to_record(message))
+                if not self._write(message_to_record(message)):
+                    return
+            self._write({"type": "compact_commit", "checkpoint_id": checkpoint_id})
 
     def _write(self, record: dict[str, object]) -> bool:
         if self._handle is None:
             return False
+        safe = redact(record)
+        # 恢复时不能将掩码参数当作原始操作执行。
+        for original, call in zip(
+            record.get("tool_calls", []), safe.get("tool_calls", []), strict=True
+        ):
+            if original != call:
+                call["parse_error"] = "存档调用已脱敏，需要重新读取实际状态，禁止直接重放掩码参数"
         try:
-            self._handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            self._handle.write(json.dumps(safe, ensure_ascii=False, separators=(",", ":")) + "\n")
             self._handle.flush()
             os.fsync(self._handle.fileno())
         except OSError as exc:
+            self.persistence_healthy = False
             logger.warning("会话存档写入失败：%s", type(exc).__name__)
             return False
         return True
@@ -123,6 +145,7 @@ class RestoredSession:
     info: SessionInfo
     messages: tuple[ChatMessage, ...]
     last_ts: int
+    tool_outcomes: tuple[tuple[ToolCall, ToolResult | None], ...] = ()
 
 
 def scan_sessions(workspace: Path) -> list[SessionInfo]:
@@ -147,7 +170,10 @@ def scan_sessions(workspace: Path) -> list[SessionInfo]:
                         record = json.loads(line)
                     except (json.JSONDecodeError, UnicodeError):
                         continue
-                    if record.get("type") == "compact":
+                    if not isinstance(record, dict) or record.get("type") in {
+                        "compact",
+                        "compact_commit",
+                    }:
                         continue
                     count += 1
                     model = str(record.get("model") or model)
@@ -164,6 +190,8 @@ def scan_sessions(workspace: Path) -> list[SessionInfo]:
 
 def restore_session(info: SessionInfo, *, now: int | None = None) -> RestoredSession:
     records: list[dict[str, object]] = []
+    pending: list[dict[str, object]] | None = None
+    checkpoint: dict[str, object] = {}
     try:
         lines = info.context.conversation_path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError):
@@ -173,12 +201,31 @@ def restore_session(info: SessionInfo, *, now: int | None = None) -> RestoredSes
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if record.get("type") == "compact":
-            records = []
+        if not isinstance(record, dict):
             continue
-        if isinstance(record, dict):
+        if record.get("type") == "compact":
+            # 未提交的新快照不覆盖上一份完整状态。
+            pending = []
+            checkpoint = record
+            continue
+        if record.get("type") == "compact_commit":
+            if (
+                pending is not None
+                and record.get("checkpoint_id") == checkpoint.get("checkpoint_id")
+                and len(pending) == checkpoint.get("expected_messages")
+            ):
+                records = pending
+                pending = None
+            continue
+        if pending is not None:
+            pending.append(record)
+        else:
             records.append(record)
+    # 兼容旧版 compact；孤立 marker 不清空可恢复状态。
+    if pending and "checkpoint_id" not in checkpoint:
+        records = pending
     messages: list[ChatMessage] = []
+    uncertain_effects = False
     last_ts = 0
     for record in records:
         try:
@@ -186,21 +233,83 @@ def restore_session(info: SessionInfo, *, now: int | None = None) -> RestoredSes
             last_ts = max(last_ts, int(record.get("ts") or 0))
         except (KeyError, TypeError, ValueError):
             continue
+    # 在修复协议历史之前保留操作记录，部分结果和孤立调用仍需要重放保护。
+    outcomes: dict[str, tuple[ToolCall, ToolResult | None]] = {}
+    for message in messages:
+        for call in message.tool_calls:
+            outcomes[call.id] = (call, None)
+        for result in message.tool_results:
+            previous = outcomes.get(result.tool_call_id)
+            if previous is not None and previous[0].name == result.name:
+                outcomes[result.tool_call_id] = (previous[0], result)
     for index, message in enumerate(messages):
         if message.role != "assistant" or not message.tool_calls:
             continue
         if index + 1 >= len(messages) or messages[index + 1].role != "tool":
+            uncertain_effects = any(
+                call.name in {"write_file", "edit_file", "bash"} for call in message.tool_calls
+            )
             messages = messages[:index]
             break
         expected = {call.id for call in message.tool_calls}
         actual = {result.tool_call_id for result in messages[index + 1].tool_results}
         if not expected.issubset(actual):
+            uncertain_effects = any(
+                call.id not in actual and call.name in {"write_file", "edit_file", "bash"}
+                for call in message.tool_calls
+            )
             messages = messages[:index]
             break
     current = now or int(time.time())
     if last_ts and current - last_ts > 6 * 3600:
         messages.append(ChatMessage("user", _pause_notice(current - last_ts)))
-    return RestoredSession(info, tuple(messages), last_ts)
+    if uncertain_effects:
+        messages.append(
+            ChatMessage(
+                "user",
+                "[恢复边界] 未完成工具调用可能已经产生副作用。"
+                "请先检查文件与外部状态，禁止盲目重放写入或命令。",
+            )
+        )
+    drift = _workspace_drift(messages, info.context.workspace)
+    if drift:
+        messages.append(
+            ChatMessage(
+                "user",
+                "[工作区变化] 已读取文件的状态已失效：\n"
+                + "\n".join(drift)
+                + "\n请重新读取相关文件，禁止依据旧文件结果继续修改。",
+            )
+        )
+    return RestoredSession(info, tuple(messages), last_ts, tuple(outcomes.values()))
+
+
+def _workspace_drift(messages: list[ChatMessage], workspace: Path) -> list[str]:
+    latest: dict[str, str] = {}
+    for message in messages:
+        for result in message.tool_results:
+            path = result.metadata.get("path")
+            digest = result.metadata.get("content_sha256")
+            if result.success and result.name == "read_file" and isinstance(path, str):
+                latest[path] = digest if isinstance(digest, str) else ""
+    changed = []
+    for raw_path, digest in latest.items():
+        path = Path(raw_path)
+        path = (path if path.is_absolute() else workspace / path).resolve(strict=False)
+        if not path.is_relative_to(workspace.resolve()):
+            changed.append("文件已越出工作区")
+            continue
+        if not digest:
+            changed.append(f"{path}：旧版本记录无指纹，内容未经重新核验")
+            continue
+        try:
+            current = hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+        except (OSError, UnicodeError):
+            changed.append(f"{path}：已删除或不可读")
+            continue
+        if current != digest:
+            changed.append(f"{path}：内容已改变")
+    return changed
 
 
 def cleanup_expired_sessions(

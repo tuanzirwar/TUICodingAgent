@@ -102,6 +102,8 @@ def test_explicit_memory_detection_ignores_general_memory_discussion() -> None:
         == "I prefer short replies"
     )
     assert explicit_memory_content("人的记忆是如何形成的？") == ""
+    assert not should_update_memory(1, "如果已有可靠项目记忆，不必重复读取")
+    assert not should_update_memory(1, "查询记忆中的服务超时设置")
 
 
 def test_index_injection_limit_and_trigger(tmp_path: Path) -> None:

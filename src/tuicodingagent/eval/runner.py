@@ -90,6 +90,8 @@ async def run_eval(
                         tool_failures += 1
                 elif event.type == RuntimeEventType.LIMIT_REACHED:
                     limit_reached = True
+                    status = "budget_exhausted"
+                    error = event.text
                 elif event.type == RuntimeEventType.COMPLETED:
                     final_text = event.text
                 elif event.type == RuntimeEventType.FAILED:
@@ -186,10 +188,7 @@ def _git_diff(workspace: Path) -> str:
         [
             raw.decode("utf-8", errors="surrogateescape")
             for raw in tracked.stdout.split(b"\0")
-            if raw
-            and not _is_excluded_patch_path(
-                raw.decode("utf-8", errors="surrogateescape")
-            )
+            if raw and not _is_excluded_patch_path(raw.decode("utf-8", errors="surrogateescape"))
         ]
         if tracked.returncode == 0
         else []
@@ -247,6 +246,8 @@ def _is_excluded_patch_path(path: str) -> bool:
         return True
     name = parts[-1] if parts else ""
     return name.startswith("test_") or "_test." in name
+
+
 def _prepare_paths(workspace: Path, output_dir: Path) -> tuple[Path, Path]:
     root = workspace.resolve()
     destination = output_dir.resolve()

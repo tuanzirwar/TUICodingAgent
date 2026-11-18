@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import aclosing
 from dataclasses import dataclass, field
 
 from ..models import PermissionChoice, RuntimeEventType, ToolCall
@@ -91,8 +92,13 @@ class Manager:
                 self.notification_sink(self.notification(item))
 
     async def _consume(self, item: BackgroundTask) -> None:
+        # FAILED/LIMIT 会提前结束消费，必须等待生成器 finally 完成租约和锁释放。
+        async with aclosing(item.runtime.chat(item.task)) as stream:
+            await self._consume_events(item, stream)
+
+    async def _consume_events(self, item: BackgroundTask, stream) -> None:
         chunks: list[str] = []
-        async for event in item.runtime.chat(item.task):
+        async for event in stream:
             if event.type == RuntimeEventType.TEXT_DELTA:
                 chunks.append(event.text)
             elif event.type == RuntimeEventType.TOOL_STARTED and event.tool_call:
@@ -110,7 +116,10 @@ class Manager:
                 item.runtime.resolve_permission(event.tool_call.id, choice)
             elif event.type == RuntimeEventType.COMPLETED:
                 item.result = event.text or "".join(chunks)
-            elif event.type == RuntimeEventType.FAILED:
+            elif (
+                event.type == RuntimeEventType.FAILED
+                or event.type == RuntimeEventType.LIMIT_REACHED
+            ):
                 raise RuntimeError(event.text)
             elif event.type == RuntimeEventType.CANCELLED:
                 raise asyncio.CancelledError

@@ -17,6 +17,15 @@ python -m venv .venv
 .venv\Scripts\python -m pip install -e ".[dev]"
 ```
 
+有 uv 时可按仓库的锁文件恢复依赖：
+
+~~~powershell
+uv sync --locked --extra dev
+uv run --locked python -m tuicodingagent
+~~~
+
+首次运行前，按下节配置模型凭据。
+
 ## 配置
 
 复制 `config.example.yaml` 为项目当前目录下的 `config.yaml`，填写真实 API 密钥。每个 provider 支持以下字段：

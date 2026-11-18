@@ -318,7 +318,7 @@ async def test_manager_polls_and_marks_lead_mail(tmp_path: Path) -> None:
     team = await manager.create("mail-team")
     mailbox = Mailbox(team.config_dir / "mailbox")
     await mailbox.write("lead", Message("alice", "完成报告"))
-    messages = await manager.poll_lead_mailboxes()
+    messages = await manager.poll_lead_mailboxes(mark_read=True)
     assert [(item.team_name, item.sender, item.text) for item in messages] == [
         ("mail-team", "alice", "完成报告")
     ]
@@ -500,6 +500,13 @@ async def test_team_runtime_reads_mailbox_before_model_call(tmp_path: Path) -> N
         def set_reminder_provider(self, provider) -> None:
             self.provider = provider
 
+        def set_delivery_callbacks(
+            self, commit, release, *, persist, validate=None, watch=None
+        ) -> None:
+            self.commit = commit
+            self.release = release
+            self.validate = validate
+
         def set_permission_mode(self, mode: PermissionMode) -> None:
             self.mode = mode
 
@@ -512,7 +519,22 @@ async def test_team_runtime_reads_mailbox_before_model_call(tmp_path: Path) -> N
     assert "继续实现功能" in reminder
     assert "plan_approval_response" in reminder
     assert runtime.mode == PermissionMode.DEFAULT
+    await runtime.validate()
+    # 领取仅隐藏 pending；实际确认必须由成功处理回调触发。
     assert await mailbox.read("agent-a") == []
+    with mailbox._connect() as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM messages WHERE status='inflight'").fetchone()[
+                0
+            ]
+            == 2
+        )
+    await runtime.commit()
+    with mailbox._connect() as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM messages WHERE status='acked'").fetchone()[0]
+            == 2
+        )
 
 
 def test_agent_name_registry_bidirectional_and_overwrite() -> None:

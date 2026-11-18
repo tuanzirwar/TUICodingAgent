@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from .context import (
@@ -31,6 +33,7 @@ from .models import (
     ToolResult,
 )
 from .permissions import PermissionManager
+from .process_cleanup import await_cleanup
 from .prompts import build_system_prompt, inject_system_reminder, reminder_for
 from .providers.base import ChatProvider
 from .session import RestoredSession, SessionContext, Writer
@@ -96,6 +99,7 @@ class ConversationRuntime:
         self._history: list[ChatMessage] = []
         self._busy = False
         self._cancel_requested = False
+        self._cancel_event = asyncio.Event()
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_cache_creation_input_tokens = 0
@@ -104,12 +108,18 @@ class ConversationRuntime:
         self._permission_call_id = ""
         self._session_lock = asyncio.Lock()
         self._reminder_provider: Callable[[], Awaitable[str]] | None = None
+        self._delivery_commit: Callable[[], Awaitable[None]] | None = None
+        self._delivery_release: Callable[[], Awaitable[None]] | None = None
+        self._delivery_validate: Callable[[], Awaitable[None]] | None = None
+        self._delivery_watch: Callable[[], Awaitable[None]] | None = None
+        self._persist_reminders = False
         self.turn_count = 0
         self._memory_tasks: set[asyncio.Task[bool]] = set()
         self.skill_catalog = ""
         self.active_skills: dict[str, str] = {}
         self._skill_tool_allowlists: dict[str, frozenset[str]] = {}
         self._external_reminders: list[str] = []
+        self._resume_tool_outcomes: dict[str, tuple[ToolCall, ToolResult]] = {}
 
     @property
     def history(self) -> tuple[ChatMessage, ...]:
@@ -156,6 +166,42 @@ class ConversationRuntime:
 
         self._reminder_provider = provider
 
+    def set_delivery_callbacks(
+        self, commit, release, *, persist: bool = True, validate=None, watch=None
+    ) -> None:
+        """团队消息仅在任务成功且输入已存档后确认，其他退出路径释放租约。"""
+        self._delivery_commit = commit
+        self._delivery_release = release
+        self._delivery_validate = validate
+        self._delivery_watch = watch
+        self._persist_reminders = persist
+
+    async def _validate_delivery(self) -> None:
+        if self._delivery_validate is not None:
+            await self._delivery_validate()
+
+    async def _execute_guarded_tool(self, call: ToolCall) -> ToolResult:
+        # 审批等待期间可能失去租约，必须在真正执行工具前再次校验。
+        await self._validate_delivery()
+        self._raise_if_cancelled()
+        execution = asyncio.create_task(self.tool_registry.execute(call))
+        cancellation = asyncio.create_task(self._cancel_event.wait())
+        lease = asyncio.create_task(self._delivery_watch()) if self._delivery_watch else None
+        tasks = [execution, cancellation, *([lease] if lease else [])]
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if cancellation in done:
+                raise _AgentCancelled
+            if lease is not None and lease in done:
+                await lease
+                raise ProviderError("团队消息租约监控提前结束")
+            return await execution
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def run_to_completion(self, task: str) -> str:
         """非交互跑完整个 ReAct 循环并返回最终文本。"""
 
@@ -180,6 +226,8 @@ class ConversationRuntime:
                     raise RuntimeError(event.text)
                 elif event.type == RuntimeEventType.CANCELLED:
                     raise asyncio.CancelledError
+                elif event.type == RuntimeEventType.LIMIT_REACHED:
+                    raise RuntimeError(event.text)
                 elif event.type == RuntimeEventType.PERMISSION_REQUESTED:
                     raise RuntimeError(f"子 Agent 等待权限审批：{event.text}")
         except BaseException as exc:
@@ -230,6 +278,7 @@ class ConversationRuntime:
 
     def request_cancel(self) -> None:
         self._cancel_requested = True
+        self._cancel_event.set()
         future = self._permission_future
         if future is not None and not future.done():
             future.set_result(PermissionChoice.CANCEL)
@@ -243,6 +292,7 @@ class ConversationRuntime:
         await self._session_lock.acquire()
         self._busy = True
         self._cancel_requested = False
+        self._cancel_event.clear()
         if isinstance(self.provider, TracingProvider):
             session_id = self._session_id() or self.trace_session_id
             self.trace_session_id = session_id
@@ -267,6 +317,10 @@ class ConversationRuntime:
         unknown_rounds = 0
         modified_paths: set[Path] = set()
         verification_attempts = 0
+        # 调用 ID 在一个用户任务内标识同一次操作，失败结果也可能已有副作用。
+        tool_outcomes = self._resume_tool_outcomes
+        self._resume_tool_outcomes = {}
+        delivery_committed = False
         try:
             yield RuntimeEvent(RuntimeEventType.STARTED, elapsed=0.0)
             persisted_count = self._persist_new(turn_messages, persisted_count)
@@ -331,17 +385,26 @@ class ConversationRuntime:
                             )
                         else:
                             status = f"上下文自动压缩失败：{compacted.error}"
+                            if self.context_controller.estimate_tokens(combined) >= (
+                                self.context_controller.context_window - MANUAL_SAFETY_MARGIN
+                            ):
+                                raise ProviderError(status)
                         yield RuntimeEvent(
                             RuntimeEventType.CONTEXT_STATUS,
                             text=status,
                             iteration=iteration,
                         )
+                await self._validate_delivery()
                 await self.run_hook(HookEvent.PRE_USER_MESSAGE, prompt=text)
                 reminder = reminder_for(self.mode, iteration)
                 if self._reminder_provider is not None:
                     supplied = await self._reminder_provider()
                     if supplied:
-                        reminder += "\n\n" + supplied
+                        if self._persist_reminders:
+                            turn_messages.append(ChatMessage("user", supplied))
+                            persisted_count = self._persist_new(turn_messages, persisted_count)
+                        else:
+                            reminder += "\n\n" + supplied
                 if self._external_reminders:
                     reminder += "\n\n" + "\n\n".join(self._external_reminders)
                     self._external_reminders.clear()
@@ -357,6 +420,7 @@ class ConversationRuntime:
                 emergency_retried = False
                 while True:
                     try:
+                        await self._validate_delivery()
                         async for event in self.provider.stream(
                             prompt,
                             request_messages,
@@ -471,9 +535,7 @@ class ConversationRuntime:
                                     + "\n请修复后重新验证。",
                                 )
                             )
-                            persisted_count = self._persist_new(
-                                turn_messages, persisted_count
-                            )
+                            persisted_count = self._persist_new(turn_messages, persisted_count)
                             continue
                         if not verification.success:
                             complete_text += "\n\n自动验证未通过：\n" + verification.output
@@ -485,11 +547,29 @@ class ConversationRuntime:
                         )
                     )
                     persisted_count = self._persist_new(turn_messages, persisted_count)
-                    self._history.extend(turn_messages)
                     await self._schedule_memory_update(text, tuple(turn_messages))
                     await self.run_hook(HookEvent.STOP, iter=iteration)
+                    if self._delivery_commit is not None:
+                        if (
+                            self.session_writer is not None
+                            and not self.session_writer.persistence_healthy
+                        ):
+                            raise ProviderError("消息处理结果未能持久化，不能确认团队消息")
+                        # 验证仍失败时不确认任务输入，交由释放/重试路径处理。
+                        if (
+                            modified_paths
+                            and self.verification_runner is not None
+                            and not verification.success
+                        ):
+                            raise ProviderError("自动验证未通过，团队消息保持未确认")
+                        await self._delivery_commit()
+                        delivery_committed = True
+                    self._history.extend(turn_messages)
                     yield _completed_event(complete_text, started, iteration)
                     return
+
+                if len({call.id for call in current_calls}) != len(current_calls):
+                    raise ProviderError("同一轮工具调用包含重复 ID，已停止执行以避免结果错配")
 
                 turn_messages.append(
                     ChatMessage(
@@ -503,8 +583,14 @@ class ConversationRuntime:
                 assistant_staged = True
                 results: list[ToolResult] = []
                 for batch in _execution_batches(current_calls, self.tool_registry):
+                    shell_state = None
+                    if self.verification_runner is not None and any(
+                        call.name == "bash" for call in batch
+                    ):
+                        shell_state = await self.verification_runner.working_state()
                     executable: list[ToolCall] = []
                     ready_results: dict[str, ToolResult] = {}
+                    replayed_ids: set[str] = set()
                     for call in batch:
                         yield RuntimeEvent(
                             RuntimeEventType.TOOL_STARTED,
@@ -512,6 +598,45 @@ class ConversationRuntime:
                             iteration=iteration,
                             tool_call=call,
                         )
+                        previous = tool_outcomes.get(call.id)
+                        if previous is not None:
+                            original, original_result = previous
+                            if (
+                                original.name != call.name
+                                or original.arguments != call.arguments
+                                or original.parse_error != call.parse_error
+                            ):
+                                result = ToolResult(
+                                    call.id,
+                                    call.name,
+                                    False,
+                                    error="调用 ID 已使用且参数不同，禁止重复副作用；"
+                                    "新操作须使用新 ID",
+                                    metadata={"replay_conflict": True},
+                                )
+                            else:
+                                result = replace(
+                                    original_result,
+                                    metadata={
+                                        **original_result.metadata,
+                                        "replay_suppressed": True,
+                                    },
+                                )
+                            ready_results[call.id] = result
+                            replayed_ids.add(call.id)
+                            self.trace_recorder.record(
+                                TraceEvent(
+                                    "tool_replay",
+                                    session_id=self.trace_session_id,
+                                    agent_id=self.agent_id,
+                                    tool_name=call.name,
+                                    metadata={
+                                        "suppressed": True,
+                                        "conflict": "replay_conflict" in result.metadata,
+                                    },
+                                ).finish(success=result.success)
+                            )
+                            continue
                         if call.name in self.blocked_tool_errors:
                             ready_results[call.id] = ToolResult(
                                 call.id,
@@ -531,6 +656,7 @@ class ConversationRuntime:
                                 error=reason,
                             )
                             continue
+                        await self._validate_delivery()
                         hook = await self.run_hook(
                             HookEvent.PRE_TOOL_USE,
                             tool_name=call.name,
@@ -594,7 +720,7 @@ class ConversationRuntime:
                                 self.permission_manager.allow_always(evaluation.exact_rule)
                         executable.append(call)
                     tasks = [
-                        asyncio.create_task(self.tool_registry.execute(call)) for call in executable
+                        asyncio.create_task(self._execute_guarded_tool(call)) for call in executable
                     ]
                     try:
                         executed = await asyncio.gather(*tasks)
@@ -606,23 +732,33 @@ class ConversationRuntime:
                     ready_results.update(
                         (call.id, result) for call, result in zip(executable, executed, strict=True)
                     )
+                    if shell_state is not None:
+                        after_shell = await self.verification_runner.working_state()
+                        modified_paths.update(
+                            path
+                            for path in shell_state.keys() | after_shell.keys()
+                            if shell_state.get(path) != after_shell.get(path)
+                        )
                     if self.context_controller is not None:
                         for call in batch:
                             await self.context_controller.record_read(call, ready_results[call.id])
                     for call in batch:
                         result = ready_results[call.id]
+                        if call.id not in replayed_ids:
+                            tool_outcomes[call.id] = (copy.deepcopy(call), result)
                         results.append(result)
                         if result.success and call.name in {"write_file", "edit_file"}:
                             raw_path = result.metadata.get("path")
                             if isinstance(raw_path, str):
                                 modified_paths.add(Path(raw_path))
-                        await self.run_hook(
-                            HookEvent.POST_TOOL_USE,
-                            tool_name=call.name,
-                            tool_input=call.arguments,
-                            tool_result=result.output if result.success else result.error,
-                            is_error=not result.success,
-                        )
+                        if call.id not in replayed_ids:
+                            await self.run_hook(
+                                HookEvent.POST_TOOL_USE,
+                                tool_name=call.name,
+                                tool_input=call.arguments,
+                                tool_result=result.output if result.success else result.error,
+                                is_error=not result.success,
+                            )
                         yield RuntimeEvent(
                             RuntimeEventType.TOOL_FINISHED,
                             elapsed=time.monotonic() - started,
@@ -689,14 +825,27 @@ class ConversationRuntime:
             turn_error = type(exc).__name__
             raise
         finally:
-            turn_trace.tool_latency_ms = round((time.monotonic() - started) * 1000, 3)
-            turn_trace.success = not turn_error
-            turn_trace.error_type = turn_error
-            turn_trace.end_time = utc_now()
-            self.trace_recorder.record(turn_trace)
-            self._busy = False
-            self._cancel_requested = False
-            self._session_lock.release()
+            try:
+                if not delivery_committed and self._delivery_release is not None:
+                    try:
+                        await await_cleanup(self._delivery_release())
+                    except Exception as exc:
+                        # 释放失败仍保留未确认租约，重启后可以按超时恢复。
+                        self.trace_recorder.record(
+                            TraceEvent(
+                                "mailbox_release", metadata={"error_type": type(exc).__name__}
+                            ).finish(success=False)
+                        )
+            finally:
+                self._busy = False
+                self._cancel_requested = False
+                self._cancel_event.clear()
+                self._session_lock.release()
+                turn_trace.tool_latency_ms = round((time.monotonic() - started) * 1000, 3)
+                turn_trace.success = not turn_error
+                turn_trace.error_type = turn_error
+                turn_trace.end_time = utc_now()
+                self.trace_recorder.record(turn_trace)
 
     async def force_compact(self) -> CompactResult:
         if self.context_controller is None:
@@ -717,6 +866,19 @@ class ConversationRuntime:
             await self.session_end()
             old_writer = self.session_writer
             self._history = list(restored.messages)
+            self._resume_tool_outcomes = {}
+            for call, result in restored.tool_outcomes:
+                if self.tool_registry is None or self.tool_registry.is_read_only(call.name):
+                    continue
+                if result is None:
+                    result = ToolResult(
+                        call.id,
+                        call.name,
+                        False,
+                        error="恢复记录缺少操作结果，副作用状态不确定；请检查实际状态，禁止原调用重放",
+                        metadata={"recovery_uncertain": True},
+                    )
+                self._resume_tool_outcomes[call.id] = (copy.deepcopy(call), result)
             self.session_writer = writer
             if self.context_controller is not None:
                 self.context_controller = ContextController(
@@ -725,13 +887,11 @@ class ConversationRuntime:
                     restored.info.context,
                 )
                 # 存档可能保留原始工具输出；恢复时先脱载并重写快照。
-                managed, offloaded = await self.context_controller.offload_and_snip(
-                    self._history
-                )
+                managed, offloaded = await self.context_controller.offload_and_snip(self._history)
                 if offloaded:
                     self._history = list(managed)
                     writer.replace(managed)
-            if old_writer is not None:
+            if old_writer is not None and old_writer is not writer:
                 old_writer.close()
             await self.session_resume()
             if (

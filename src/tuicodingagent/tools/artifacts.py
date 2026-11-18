@@ -46,6 +46,8 @@ class ArtifactStore:
         matches = [path for path in self.files() if path.name == value or path.stem == value]
         if not matches:
             raise FileNotFoundError(value)
+        if len(matches) > 1:
+            raise ValueError("artifact id 不唯一，请使用落盘预览中的完整路径")
         return matches[0]
 
 
@@ -76,8 +78,7 @@ class ReadArtifactTool:
             lines = text.splitlines()
             selected = lines[offset - 1 : offset - 1 + limit]
             output = "\n".join(
-                f"{number:>6}\t{line}"
-                for number, line in enumerate(selected, start=offset)
+                f"{number:>6}\t{line}" for number, line in enumerate(selected, start=offset)
             )
             output, truncated = truncate_text(output)
             return ToolResult(

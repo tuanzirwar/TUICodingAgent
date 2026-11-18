@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import heapq
 import json
+import logging
 import os
 import random
 import sqlite3
+import tempfile
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +28,7 @@ MESSAGE_TYPES = frozenset(
     }
 )
 TERMINAL_STATUSES = frozenset({"acked", "cancelled", "dead"})
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -138,6 +142,49 @@ class Mailbox:
 
     async def ack(self, agent_id: str, message_ids: list[str]) -> None:
         await asyncio.to_thread(self._set_status, agent_id, message_ids, "acked")
+
+    async def settle_claims(
+        self, agent_id: str, claims: list[Message], action: str, *, ack_timeout: float = 30.0
+    ) -> set[str]:
+        """按领取时的 deadline 校验租约，过期消费者不能确认新的领取者。"""
+        if action not in {"ack", "release", "renew"} or ack_timeout <= 0:
+            raise ValueError("租约操作或超时时间无效")
+        return await asyncio.to_thread(
+            self._settle_claims_sync, agent_id, claims, action, ack_timeout
+        )
+
+    def _settle_claims_sync(self, agent_id, claims, action, ack_timeout) -> set[str]:
+        now = time.time()
+        accepted: set[str] = set()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for claim in claims:
+                row = connection.execute(
+                    "SELECT * FROM messages WHERE agent_id=? AND id=? AND status='inflight' "
+                    "AND ack_deadline=? AND ack_deadline>?",
+                    (agent_id, claim.message_id, claim.ack_deadline, now),
+                ).fetchone()
+                if row is None:
+                    continue
+                deadline = now + ack_timeout if action == "renew" else 0
+                retries = int(row["retry_count"]) + int(action == "release")
+                status = (
+                    "inflight"
+                    if action == "renew"
+                    else "acked"
+                    if action == "ack"
+                    else ("pending" if retries <= int(row["max_retry"]) else "dead")
+                )
+                connection.execute(
+                    "UPDATE messages SET status=?,ack_deadline=?,retry_count=?,available_at=?,"
+                    "updated_at=? WHERE id=?",
+                    (status, deadline, retries, now, now, claim.message_id),
+                )
+                claim.ack_deadline = deadline
+                claim.status = status
+                accepted.add(claim.message_id)
+        self._sync_mirror(agent_id)
+        return accepted
 
     async def retry(self, agent_id: str, message_id: str, *, delay: float = 0.0) -> bool:
         return await asyncio.to_thread(self._retry_sync, agent_id, message_id, delay)
@@ -352,25 +399,37 @@ class Mailbox:
             )
 
     def _sync_mirror(self, agent_id: str) -> None:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM messages WHERE agent_id=? ORDER BY created_at,id", (agent_id,)
-            ).fetchall()
-        items = [self._from_row(row).to_json() for row in rows]
         with self._mirror_lock:
-            self._atomic_write(self.path(agent_id), items)
+            try:
+                with self._connect() as connection:
+                    rows = connection.execute(
+                        "SELECT * FROM messages WHERE agent_id=? ORDER BY created_at,id",
+                        (agent_id,),
+                    ).fetchall()
+                items = [self._from_row(row).to_json() for row in rows]
+                self._atomic_write(self.path(agent_id), items)
+            except OSError as exc:
+                # 权威状态已经提交；兼容镜像失败不能让已投递消息被当作发送失败。
+                logger.warning("邮箱兼容镜像写入失败，SQLite 状态仍有效：%s", type(exc).__name__)
 
     @staticmethod
     def _from_row(row: sqlite3.Row) -> Message:
         return Message(
-            sender=str(row["sender"]), text=str(row["text"]), type=str(row["type"]),
+            sender=str(row["sender"]),
+            text=str(row["text"]),
+            type=str(row["type"]),
             request_id=str(row["request_id"]),
             approve=None if row["approve"] is None else bool(row["approve"]),
-            read=str(row["status"]) == "acked", timestamp=str(row["timestamp"]),
-            message_id=str(row["id"]), priority=int(row["priority"]),
-            dedup_key=str(row["dedup_key"]), retry_count=int(row["retry_count"]),
-            max_retry=int(row["max_retry"]), plan_version=int(row["plan_version"]),
-            status=str(row["status"]), available_at=float(row["available_at"]),
+            read=str(row["status"]) == "acked",
+            timestamp=str(row["timestamp"]),
+            message_id=str(row["id"]),
+            priority=int(row["priority"]),
+            dedup_key=str(row["dedup_key"]),
+            retry_count=int(row["retry_count"]),
+            max_retry=int(row["max_retry"]),
+            plan_version=int(row["plan_version"]),
+            status=str(row["status"]),
+            available_at=float(row["available_at"]),
             ack_deadline=float(row["ack_deadline"]),
         )
 
@@ -390,10 +449,27 @@ class Mailbox:
         return raw if isinstance(raw, list) else []
 
     @staticmethod
-    def _atomic_write(path: Path, items: list[dict[str, object]]) -> None:
-        temporary = path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
-        os.replace(temporary, path)
+    def _atomic_write(path: Path, items: object) -> None:
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix=path.name + ".", suffix=".tmp", dir=path.parent
+        )
+        temporary = Path(raw_path)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps(items, ensure_ascii=False))
+                stream.flush()
+                os.fsync(stream.fileno())
+            for attempt in range(4):
+                try:
+                    os.replace(temporary, path)
+                    return
+                except PermissionError:
+                    if attempt == 3:
+                        raise
+                    time.sleep(0.02 * (attempt + 1))
+        finally:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _acquire(lock: Path) -> None:

@@ -17,6 +17,7 @@ from ..worktree import Manager as WorktreeManager
 from .backend import BackendType, SpawnRequest, new_backend
 from .context import TeammateContext, current_teammate, with_teammate
 from .core import Manager, TeammateInfo
+from .delivery import MailboxDelivery
 from .mailbox import Mailbox, Message
 
 TEAMMATE_TOOLS = frozenset(
@@ -133,6 +134,7 @@ class TeamService:
             runtime.session_writer = Writer(
                 SessionContext.create(self.workspace, agent_id), runtime.provider.config.model
             )
+            runtime.agent_id = agent_id
             self._attach_mailbox(runtime, team, member)
             request = SpawnRequest(
                 team_name=team.name,
@@ -261,7 +263,6 @@ class TeamService:
                 workspace=Path(member.worktree_path),
             )
             session_context = SessionContext.create(self.workspace, member.agent_id)
-            runtime.session_writer = Writer(session_context, runtime.provider.config.model)
             session_info = SessionInfo(
                 session_context,
                 member.name,
@@ -270,7 +271,11 @@ class TeamService:
                 0,
                 0,
             )
-            runtime.seed_history(restore_session(session_info).messages)
+            await runtime.restore(
+                restore_session(session_info),
+                Writer(session_context, runtime.provider.config.model),
+            )
+            runtime.agent_id = member.agent_id
             self._attach_mailbox(runtime, team, member)
             previous_runtime = runtime
         else:
@@ -288,28 +293,9 @@ class TeamService:
 
     def _attach_mailbox(self, runtime, team, member: TeammateInfo) -> None:
         mailbox = Mailbox(team.config_dir / "mailbox")
-
-        async def provide() -> str:
-            messages = await mailbox.read(member.agent_id)
-            if not messages:
-                return ""
-            await mailbox.mark_read(member.agent_id, list(range(len(messages))))
-            for message in messages:
-                if message.type == "plan_approval_response":
-                    runtime.set_permission_mode(
-                        PermissionMode(team.lead_permission_mode)
-                        if message.approve
-                        else PermissionMode.PLAN
-                    )
-            rows = [f"收到 {len(messages)} 条新消息:"]
-            rows.extend(
-                f"[{index}] 来自 {message.sender}"
-                f"(type={message.type},ts={message.timestamp}):\n    {message.text}"
-                for index, message in enumerate(messages, 1)
-            )
-            return "<incoming-messages>\n" + "\n".join(rows) + "\n</incoming-messages>"
-
-        runtime.set_reminder_provider(provide)
+        MailboxDelivery(
+            runtime, mailbox, member.agent_id, permission_mode=team.lead_permission_mode
+        ).bind()
 
     def _watch_completion(self, team, member: TeammateInfo, item) -> None:
         async def finished(_handle) -> None:

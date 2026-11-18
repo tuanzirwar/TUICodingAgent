@@ -264,6 +264,7 @@ class TUICodingAgentApp(App[None]):
         self.subagent_service = service
         self.team_manager = team_manager
         self.team_service = team_service
+        team_manager.attach_lead_runtime(self.runtime)
         self._lead_mail_task = asyncio.create_task(self._consume_lead_mail())
         self.skill_loader = loader
         self.skill_executor = SkillExecutor(
@@ -568,10 +569,6 @@ class TUICodingAgentApp(App[None]):
             messages = await self.team_manager.poll_lead_mailboxes()
             if not messages:
                 continue
-            body = "\n".join(f"[{item.team_name}/{item.sender}] {item.text}" for item in messages)[
-                :8000
-            ]
-            self.runtime.queue_reminder(f"<team-update>\n{body}\n</team-update>")
             if self.session_state == SessionState.IDLE:
                 trigger = "[team-update] 队员发来新消息，请按 Coordinator 流程处理。"
                 await self.send_user_message(trigger, trigger)

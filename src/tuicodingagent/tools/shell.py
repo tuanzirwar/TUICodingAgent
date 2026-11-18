@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 from ..models import ToolCall, ToolDefinition, ToolResult
+from ..process_cleanup import decode_process_output, process_group_options, terminate_process_tree
 from .base import failure, require_string, truncate_text
 from .context import cwd_from_ctx
 
@@ -39,20 +40,23 @@ class BashTool:
                 cwd=cwd_from_ctx() or self.workspace,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **process_group_options(),
             )
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     process.communicate(), timeout=self.timeout
                 )
             except TimeoutError:
-                process.kill()
-                await process.communicate()
+                await terminate_process_tree(process)
                 return failure(call, f"命令执行超时（{self.timeout:g} 秒）", timed_out=True)
+            except BaseException:
+                await terminate_process_tree(process)
+                raise
             stdout, out_cut = truncate_text(
-                stdout_bytes.decode("utf-8", errors="replace"), MAX_COMMAND_CHARS
+                decode_process_output(stdout_bytes), MAX_COMMAND_CHARS
             )
             stderr, err_cut = truncate_text(
-                stderr_bytes.decode("utf-8", errors="replace"), MAX_COMMAND_CHARS
+                decode_process_output(stderr_bytes), MAX_COMMAND_CHARS
             )
             output = f"exit_code: {process.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
             success = process.returncode == 0

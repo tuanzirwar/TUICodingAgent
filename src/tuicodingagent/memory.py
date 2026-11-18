@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .models import ChatMessage, ProviderEventType, SystemPrompt
 from .providers.base import ChatProvider
+from .redaction import redact
 
 logger = logging.getLogger(__name__)
 MEMORY_TYPES = {
@@ -116,8 +117,7 @@ class MemoryManager:
             except Exception as exc:
                 try:
                     fallback_saved = bool(
-                        explicit_user_text
-                        and self._apply_explicit_fallback(explicit_user_text)
+                        explicit_user_text and self._apply_explicit_fallback(explicit_user_text)
                     )
                 except Exception:
                     fallback_saved = False
@@ -197,7 +197,7 @@ class MemoryManager:
             "---\n"
             f"{content}\n"
         )
-        path.write_text(text, encoding="utf-8")
+        path.write_text(redact(text), encoding="utf-8")
         return True
 
     def _apply_explicit_fallback(self, user_text: str) -> bool:
@@ -250,8 +250,8 @@ class MemoryManager:
 
 
 def should_update_memory(turn_count: int, user_text: str) -> bool:
-    lowered = user_text.lower()
-    return turn_count % 5 == 0 or any(keyword in lowered for keyword in MEMORY_KEYWORDS)
+    # 查询或讨论记忆不等于要求写入，避免每次召回再调用模型整理一次。
+    return turn_count % 5 == 0 or bool(explicit_memory_content(user_text))
 
 
 def explicit_memory_content(user_text: str) -> str:

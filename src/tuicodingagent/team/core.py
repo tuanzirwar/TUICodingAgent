@@ -276,7 +276,14 @@ class Manager:
                 return team, member
         return None
 
-    async def poll_lead_mailboxes(self) -> list[LeadMessage]:
+    def attach_lead_runtime(self, runtime):
+        from .delivery import LeadMailboxDelivery
+
+        delivery = LeadMailboxDelivery(runtime, self)
+        delivery.bind()
+        return delivery
+
+    async def poll_lead_mailboxes(self, *, mark_read: bool = False) -> list[LeadMessage]:
         from .mailbox import Mailbox
 
         found: list[LeadMessage] = []
@@ -285,7 +292,9 @@ class Manager:
             messages = await mailbox.read(team.lead_agent_id)
             if not messages:
                 continue
-            await mailbox.mark_read(team.lead_agent_id, list(range(len(messages))))
+            if mark_read:
+                # 保留显式旧版本兼容；TUI 轮询默认只查看，不提前确认。
+                await mailbox.mark_read(team.lead_agent_id, list(range(len(messages))))
             found.extend(
                 LeadMessage(
                     team.name,

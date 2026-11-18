@@ -26,7 +26,7 @@
 
 - [x] `ruff check src tests` 通过。
 - [x] `python -m compileall -q src tests` 通过。
-- [x] 全量 pytest 通过（196 passed、1 skipped）；唯一 skip 是当前 Windows 权限不允许创建符号链接，Windows Junction 降级已有测试。
+- [x] 全量 pytest 通过（2026-10-10：356 passed、1 skipped；[本轮证据](docs/evaluation/results/process_tree_validation_final_20261010/validation.json)）；唯一 skip 是当前 Windows 权限不允许创建符号链接，Windows Junction 降级已有测试。
 - [x] 使用 Textual Pilot、真实 Git、stdio/HTTP 本地服务和 Windows ConPTY 完成不依赖外部凭据的端到端场景。
 - [x] in-process Team 真实 Git Worktree 生命周期覆盖隔离写入、idle、续派和清理。
 - [x] tmux/iTerm2 spawn、wake、kill 命令与隐藏 CLI 参数由自动化测试验证。
@@ -40,6 +40,6 @@
 - [x] 在真实 tmux 同一会话中完成 ch15 AC28：Lead `%0`、队员 `%1`、唤醒续写、删除 pane/Team/Worktree 与退出清理。
 - [ ] 在 macOS iTerm2 环境复验 iTerm2 pane 后端。
 
-当前 Windows 主机没有可运行的 WSL 发行版或 iTerm2；临时便携 tmux 已完成可执行验收，服务与 socket 已清理，便携文件待显式确认删除。
+当前 Windows 主机没有可运行的 WSL 发行版或 iTerm2；2026-08 的临时便携 tmux 已完成历史验收，服务与 socket 当时已清理。2026-10-10 复查 PATH 及历史便携目录，未发现可执行 tmux；本轮使用真实 Windows ConPTY，见 [终端证据](docs/evaluation/results/lifecycle_terminal_20261010/result.json)，不替代 tmux 项。
 现有凭据仅覆盖 OpenAI Responses 兼容服务，不覆盖 Anthropic。因此剩余条目保持未勾选，
 不用 Mock 或 ConPTY 冒充真实外部环境验收。

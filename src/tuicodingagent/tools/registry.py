@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Iterable
+from contextvars import ContextVar
 from pathlib import Path
 
 from ..models import ProtocolName, ToolCall, ToolDefinition, ToolResult
@@ -30,6 +31,9 @@ class ToolRegistry:
         self.trace_session_id = ""
         self.trace_agent_id = ""
         self.trace_model = ""
+        self._trace_context: ContextVar[tuple[str, str, str]] = ContextVar(
+            "tool_trace_context", default=("", "", "")
+        )
         self._tools: dict[str, Tool] = {}
         for tool in tools:
             self.register(tool)
@@ -38,6 +42,7 @@ class ToolRegistry:
         self.trace_session_id = session_id
         self.trace_agent_id = agent_id
         self.trace_model = model
+        self._trace_context.set((session_id, agent_id, model))
 
     def register(self, tool: Tool, *, replace: bool = False) -> None:
         name = tool.definition.name
@@ -105,12 +110,13 @@ class ToolRegistry:
 
     async def execute(self, call: ToolCall) -> ToolResult:
         started = time.perf_counter()
+        session_id, agent_id, model = self._trace_context.get()
         event = TraceEvent(
             "tool_call",
             request_id=call.id,
-            session_id=self.trace_session_id,
-            agent_id=self.trace_agent_id,
-            model=self.trace_model,
+            session_id=session_id,
+            agent_id=agent_id,
+            model=model,
             tool_name=call.name,
             request_bytes=len(str(call.arguments).encode("utf-8")),
         )

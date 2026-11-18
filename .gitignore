@@ -31,3 +31,4 @@ docs/evaluation/results/**/workspace/
 docs/evaluation/results/**/_repos/
 docs/evaluation/results/**/*.jsonl
 docs/evaluation/results/**/*.log
+.harness-*/

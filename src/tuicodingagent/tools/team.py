@@ -11,7 +11,9 @@ from ..team.context import TeammateContext, current_teammate
 from ..team.core import Manager, TeamHasActiveMembersError
 from ..team.mailbox import MESSAGE_TYPES, Mailbox, Message
 from ..team.tasks import TaskStore
+from ..verification import VerificationRunner
 from .base import ToolArgumentError, require_string
+from .context import cwd_from_ctx
 
 
 def success(call: ToolCall, value: object) -> ToolResult:
@@ -150,6 +152,7 @@ class TaskUpdateTool(_TeamTool):
                 "add_blocked_by": {"type": "array", "items": {"type": "string"}},
                 "remove_blocks": {"type": "array", "items": {"type": "string"}},
                 "remove_blocked_by": {"type": "array", "items": {"type": "string"}},
+                "expected_revision": {"type": "integer", "minimum": 0},
             },
             "required": ["task_id"],
             "additionalProperties": False,
@@ -158,6 +161,49 @@ class TaskUpdateTool(_TeamTool):
 
     async def execute(self, call: ToolCall) -> ToolResult:
         _, team = self.scope()
+        if call.arguments.get("status") == "completed":
+            context = current_teammate()
+            member = team.find_member(context.agent_id) if context is not None else None
+            if member is not None and member.worktree_path:
+                from pathlib import Path
+
+                workspace = cwd_from_ctx() or Path(member.worktree_path)
+                verifier = VerificationRunner(workspace)
+                changed = await verifier.working_state()
+                if not changed and (workspace / ".git").exists():
+                    # 提交后的工作区也需要验证，不能用一次 git commit 绕过完成门槛。
+                    process = await asyncio.create_subprocess_exec(
+                        "git",
+                        "ls-files",
+                        "-z",
+                        cwd=workspace,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    try:
+                        raw, _ = await asyncio.wait_for(process.communicate(), 10)
+                    except BaseException:
+                        if process.returncode is None:
+                            process.kill()
+                        await process.wait()
+                        raise
+                    if process.returncode:
+                        return ToolResult(call.id, call.name, False, error="无法核验已提交任务产物")
+                    changed = {
+                        (workspace / name).resolve(): "tracked"
+                        for name in raw.decode("utf-8", errors="replace").split("\0")
+                        if name
+                    }
+                verification = await verifier.run(set(changed))
+                if not verification.success:
+                    return ToolResult(
+                        call.id,
+                        call.name,
+                        False,
+                        error="任务产物未通过自动验证，不能标记 completed：\n"
+                        + verification.output,
+                        metadata={"verification_failed": True},
+                    )
         task = await TaskStore(team.config_dir / "tasks.json").update(
             require_string(call, "task_id"),
             title=call.arguments.get("title"),
@@ -168,6 +214,9 @@ class TaskUpdateTool(_TeamTool):
             add_blocked_by=call.arguments.get("add_blocked_by"),
             remove_blocks=call.arguments.get("remove_blocks"),
             remove_blocked_by=call.arguments.get("remove_blocked_by"),
+            actor=current_teammate().member_name if current_teammate() is not None else None,
+            actor_aliases=(current_teammate().agent_id,) if current_teammate() is not None else (),
+            expected_revision=call.arguments.get("expected_revision"),
         )
         return success(call, {key: getattr(task, key) for key in task.__slots__})
 
