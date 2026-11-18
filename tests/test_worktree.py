@@ -93,9 +93,7 @@ async def test_create_setup_fast_recovery_and_remove_guard(tmp_path: Path) -> No
     assert (item.path / "config.yaml").read_text(encoding="utf-8") == "providers: []\n"
     assert (item.path / ".env").read_text(encoding="utf-8") == "TOKEN=test\n"
     linked_modules = item.path / "node_modules"
-    assert linked_modules.is_symlink() or (
-        hasattr(linked_modules, "is_junction") and linked_modules.is_junction()
-    )
+    assert linked_modules.samefile(repo / "node_modules")
     assert (item.path / "node_modules" / "marker.txt").read_text(encoding="utf-8") == "shared\n"
     assert git(item.path, "config", "--get", "core.hooksPath") == str((repo / ".husky").resolve())
 
